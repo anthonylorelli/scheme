@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<!-- Copyright 2006 Anthony J. Lorelli -->
+<!-- $Id: scheme.build 286 2006-03-13 22:34:56Z  $ -->
+<project name="scheme" default="build" basedir=".">
+    <description>A Scheme interpreter for .NET</description>
+    <target name="clean" description="Remove generated files">
+        <delete file="scheme.exe" failonerror="false" />
+    </target>
+    <target name="build" description="Compiles source code">
+        <csc target="exe" output="scheme.exe" debug="false">
+            <sources>
+                <include name="Boolean.cs" />
+                <include name="Character.cs" />
+                <include name="Closure.cs" />
+                <include name="Continuation.cs"/>
+                <include name="Environment.cs" />
+                <include name="Interpreter.cs" />
+                <include name="InterpreterShell.cs" />
+                <include name="List.cs" />
+                <include name="MacroExpander.cs"/>
+                <include name="Pair.cs" />
+                <include name="Parser.cs" />
+                <include name="Procedure.cs" />
+                <include name="Scanner.cs" />
+                <include name="StandardLibrary.cs" />
+                <include name="Symbol.cs" />
+                <include name="Token.cs" />
+            </sources>
+        </csc>
+    </target>
+</project>
