@@ -1,2 +1,2 @@
 # scheme
-C# RSR5 Scheme implementation
+C# R5RS Scheme implementation

@@ -1,0 +1,50 @@
+<?xml version="1.0"?>
+<!-- Copyright 2006 Anthony J. Lorelli -->
+<!-- $Id: scheme.proj 312 2006-03-28 12:12:06Z  $ -->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" 
+    DefaultTargets="Clean;Compile">
+    <PropertyGroup>
+        <AppName>scheme</AppName>
+        <BuildDir>..\bin</BuildDir>
+        <TestDir>..\test</TestDir>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="Boolean.cs"/>
+        <Compile Include="Character.cs"/>
+        <Compile Include="Closure.cs"/>
+        <Compile Include="Compiler.cs"/>
+        <Compile Include="Context.cs"/>
+        <Compile Include="Continuation.cs"/>
+        <Compile Include="Environment.cs"/>
+        <Compile Include="Frame.cs"/>
+        <Compile Include="Instruction.cs"/>
+        <Compile Include="Interpreter.cs"/>
+        <Compile Include="InterpreterShell.cs"/>
+        <Compile Include="List.cs"/>
+        <Compile Include="MacroExpander.cs"/>
+        <Compile Include="Pair.cs"/>
+        <Compile Include="Parser.cs"/>
+        <Compile Include="Primitives.cs"/>
+        <Compile Include="Procedure.cs"/>
+        <Compile Include="Scanner.cs"/>
+        <Compile Include="StandardLibrary.cs"/>
+        <Compile Include="Symbol.cs"/>
+        <Compile Include="Token.cs"/>
+        <Compile Include="Vector.cs"/>
+    </ItemGroup>
+
+    <Target Name="Compile">
+        <Csc Sources="@(Compile)" OutputAssembly="$(BuildDir)\$(AppName).exe"/>
+        <Copy SourceFiles="init.scm" DestinationFolder="$(BuildDir)"/>
+    </Target>
+    
+    <Target Name="Clean">
+        <Delete Files="$(AppName).exe"/>
+        <Delete Files="..\bin\$(AppName).exe"/>
+    </Target>
+    
+    <Target Name="Test" DependsOnTargets="Clean;Compile">
+        <Exec Command="$(BuildDir)\$(AppName).exe $(TestDir)\test.scm" />
+    </Target>
+</Project>
