@@ -1,0 +1,14 @@
+[package]
+name = "scheme"
+version = "0.1.0"
+edition = "2021"
+description = "R5RS subset Scheme interpreter with portable syntax-case macros and stack-reconstruction first-class continuations"
+authors = ["Anthony J. Lorelli"]
+
+[lib]
+name = "scheme"
+path = "src/lib.rs"
+
+[[bin]]
+name = "scheme"
+path = "src/main.rs"

@@ -10,9 +10,15 @@ namespace Scheme {
         private bool _variableArity;
         private long _argListLength;
 
-        public Closure(Pair args, Pair exp, Environment env) { 
-            _variableArity = !List.IsProper(args);
-            _args = (_variableArity) ? _MakeArgList(args) : args;
+        public Closure(object args, Pair exp, Environment env) { 
+            if (args is Symbol) {
+                _variableArity = true;
+                _args = new Pair(args, Pair.EmptyList);
+            } else {
+                Pair pairArgs = (Pair)args;
+                _variableArity = !List.IsProper(pairArgs);
+                _args = (_variableArity) ? _MakeArgList(pairArgs) : pairArgs;
+            }
             _argListLength = List.Length(_args);
             _exp = exp; 
             _env = env; 

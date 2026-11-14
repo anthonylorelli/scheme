@@ -24,10 +24,19 @@ namespace Scheme {
             get { return _globalEnv; }
         }
 
+        private bool _isEof;
+
+        public bool IsEOF {
+            get { return _isEof; }
+        }
+
         public object Evaluate() {
             object o = _compiler.Compile();
 
-            if (o == null) return o;
+            if (o == null) {
+                _isEof = true;
+                return o;
+            }
 
             return Evaluate(o, _globalEnv);
         }
@@ -133,7 +142,7 @@ namespace Scheme {
                     valueRib, env);
                 return condResult;
             } else if (instr == Instruction.Closure) {
-                return new Closure((Pair)List.Second(expr),
+                return new Closure(List.Second(expr),
                     (Pair)List.Third(expr), env);
             } else if (instr == Instruction.Assign) {
                 object assignVal = null;
@@ -232,6 +241,32 @@ namespace Scheme {
             } else {
                 throw new System.Exception("Unexpected value: " + 
                     ((instr==null)?"[null]":instr));
+            }
+        }
+
+        private System.Collections.Generic.Stack<string> _dirStack =
+            new System.Collections.Generic.Stack<string>();
+
+        public void ReadFile(string path) {
+            ReadFile(path, _globalEnv);
+        }
+
+        public void ReadFile(string path, Environment env) {
+            string resolved = path;
+            if (!File.Exists(resolved) && _dirStack.Count > 0) {
+                string candidate = Path.Combine(_dirStack.Peek(), path);
+                if (File.Exists(candidate)) {
+                    resolved = candidate;
+                }
+            }
+            string fullDir = Path.GetDirectoryName(Path.GetFullPath(resolved));
+            _dirStack.Push(fullDir ?? ".");
+            try {
+                using (StreamReader reader = new StreamReader(resolved)) {
+                    Read(reader, env);
+                }
+            } finally {
+                _dirStack.Pop();
             }
         }
 

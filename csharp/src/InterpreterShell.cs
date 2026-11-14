@@ -13,13 +13,23 @@ namespace Scheme {
             _writer = writer; _i = i;
         }
 
+        public static void LoadRuntime(Interpreter interpreter, string baseDir) {
+            interpreter.Read(Primitives.CreateReader());
+            using (System.IO.StreamReader psyntax = new System.IO.StreamReader(Path.Combine(baseDir, "psyntax.pp"))) {
+                interpreter.Read(psyntax);
+            }
+            using (System.IO.StreamReader init = new System.IO.StreamReader(Path.Combine(baseDir, "init.scm"))) {
+                interpreter.Read(init);
+            }
+        }
+
         public static void Main(string[] args) {
             InterpreterShell shell = new InterpreterShell(
                 System.Console.Out, new Interpreter(System.Console.In));
 
             string appDir = System.AppDomain.CurrentDomain.BaseDirectory;
 
-            shell._i.Read(Primitives.Reader);
+            shell._i.Read(Primitives.CreateReader());
             shell.Read(Path.Combine(appDir, "psyntax.pp"));
             shell.Read(Path.Combine(appDir, "init.scm"));
 
@@ -35,8 +45,7 @@ namespace Scheme {
 
         public void Read(string file) {
             try {
-                System.IO.StreamReader reader = new System.IO.StreamReader(file);
-                _i.Read(reader);
+                _i.ReadFile(file);
             } catch (System.Exception e) {
                 _writer.WriteLine(e.Message);
                 _writer.WriteLine(e.StackTrace);
@@ -44,10 +53,14 @@ namespace Scheme {
         }
 
         public void REPL() {
-            for (;;) {
+            while (!_i.IsEOF) {
                 _writer.Write("> ");
                 try {
                     object result = _i.Evaluate();
+                    if (_i.IsEOF) {
+                        _writer.WriteLine();
+                        break;
+                    }
                     if (result != null) _writer.WriteLine(result);
                 } catch (System.Exception e) {
                     _writer.WriteLine(e.Message);

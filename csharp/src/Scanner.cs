@@ -40,11 +40,30 @@ namespace Scheme {
                     PushChar(ch);
                     return new Token("#", TokenType.Vector);
                 case '\\':
-                    Token t = NextToken();
-                    if (t.Text.Length == 1) {
-                        return new Token(t.Text, TokenType.Character);
+                    int firstCh = GetChar();
+                    if (firstCh == -1) {
+                        throw new System.Exception("Error: unexpected EOF in character literal");
+                    }
+                    char fc = (char)firstCh;
+                    if (char.IsWhiteSpace(fc) || fc == '(' || fc == ')' ||
+                        fc == '\'' || fc == '"' || fc == ';') {
+                        return new Token(fc.ToString(), TokenType.Character);
+                    }
+                    StringBuilder charBuf = new StringBuilder();
+                    charBuf.Append(fc);
+                    int nextCh = GetChar();
+                    while (nextCh != -1 && !char.IsWhiteSpace((char)nextCh) &&
+                           nextCh != '(' && nextCh != ')' && nextCh != '\'' &&
+                           nextCh != '"' && nextCh != ';') {
+                        charBuf.Append((char)nextCh);
+                        nextCh = GetChar();
+                    }
+                    if (nextCh != -1) PushChar(nextCh);
+                    string charText = charBuf.ToString();
+                    if (charText.Length == 1) {
+                        return new Token(charText, TokenType.Character);
                     } else {
-                        string s = t.Text.ToLower();
+                        string s = charText.ToLower();
                         if (s == "space") {
                             return new Token(" ", TokenType.Character);
                         } else if (s == "newline") {
@@ -52,7 +71,7 @@ namespace Scheme {
                         } else {
                             throw new System.Exception(
                                 "Error: unrecognized #\\... literal: " +
-                                "#\\" + t.Text
+                                "#\\" + charText
                             );
                         }
                     }
@@ -110,12 +129,13 @@ namespace Scheme {
                 case '5': case '6': case '7': case '8': case '9':
                     strBuffer.Append((char)ch);
 
-                    while (char.IsDigit((char)(ch = _reader.Read()))) {
+                    while ((ch = _reader.Read()) != -1 && char.IsDigit((char)ch)) {
                         strBuffer.Append((char)ch);
                     }
 
-                    if (char.IsWhiteSpace((char)ch) || ch == ')') {
-                        PushChar(ch);
+                    if (ch == -1 || char.IsWhiteSpace((char)ch) || ch == ')' ||
+                        ch == '(' || ch == '\'' || ch == '"' || ch == ';') {
+                        if (ch != -1) PushChar(ch);
                         return new Token(strBuffer.ToString(), TokenType.Integer);
                     } else {
                         strBuffer.Append((char)ch);
@@ -129,13 +149,28 @@ namespace Scheme {
                         strBuffer.Append((char)ch);
                         ch = _reader.Read();
                     } while (
-                        !char.IsWhiteSpace((char)ch) && ch != -1 && ch != '(' && 
+                        ch != -1 && !char.IsWhiteSpace((char)ch) && ch != '(' && 
                         ch != ')' && ch != '\'' && ch != '"' && ch != ';'
                     );
 
-                    PushChar(ch);
+                    if (ch != -1) PushChar(ch);
 
-                    string s = strBuffer.ToString().ToLower();
+                    string raw = strBuffer.ToString();
+                    if (raw.Length > 1 && (raw[0] == '-' || raw[0] == '+')) {
+                        bool allDigits = true;
+                        for (int idx = 1; idx < raw.Length; ++idx) {
+                            if (!char.IsDigit(raw[idx])) {
+                                allDigits = false;
+                                break;
+                            }
+                        }
+                        if (allDigits) {
+                            string numText = (raw[0] == '+') ? raw.Substring(1) : raw;
+                            return new Token(numText, TokenType.Integer);
+                        }
+                    }
+
+                    string s = raw.ToLower();
 
                     return new Token(s,
                         (s == ".") ? TokenType.Dot : TokenType.Symbol);

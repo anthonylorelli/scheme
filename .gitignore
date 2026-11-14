@@ -1,0 +1,8 @@
+# .NET / C# build outputs
+csharp/**/bin/
+csharp/**/obj/
+*.user
+.vs/
+
+# Rust / Cargo build outputs
+rust/target/

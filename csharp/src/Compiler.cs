@@ -32,7 +32,7 @@ namespace Scheme {
                         alternative);
                 } else if (head == SymbolCache.LAMBDA) {
                     Pair bodyList = (Pair)List.Rest(tail);
-                    object bodyExpr = CompileSequence(bodyList);
+                    object bodyExpr = CompileSequence(List.Reverse(bodyList));
                     return List.Create(Instruction.Closure, 
                         List.First(tail), bodyExpr);
                 } else if (head == SymbolCache.SET) {

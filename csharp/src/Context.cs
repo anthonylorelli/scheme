@@ -197,7 +197,13 @@ namespace Scheme {
 
         public override object Invoke(object val) {
             Pair vRib = (Pair)val;
-            object fn = _i.Execute(_expr, null, _env);
+            object fn = null;
+            try {
+                fn = _i.Execute(_expr, null, _env);
+            } catch (CaptureException capEx) {
+                capEx.AddContext(new ApplyContext(_i, vRib, _env));
+                throw;
+            }
             Procedure proc = (Procedure)fn;
             return proc.Apply(_i, vRib, _env);
         }

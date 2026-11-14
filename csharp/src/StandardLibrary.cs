@@ -281,7 +281,7 @@ namespace Scheme {
             if (s == null) {
                 throw new System.Exception("Error: cannot apply string-length to non-string value");
             } else {
-                return s.Length;
+                return (long)s.Length;
             }
         }
     }
@@ -311,16 +311,14 @@ namespace Scheme {
 
     public class Load : Procedure {
         public object Apply(Interpreter i, Pair args, Environment env) {
-            System.IO.StreamReader reader = 
-                new System.IO.StreamReader(List.First(args).ToString());
-            i.Read(reader, env);
+            i.ReadFile(List.First(args).ToString(), env);
             return null;
         }
     }
 
     public class ZeroPred : Procedure {
         public object Apply(Interpreter i, Pair args, Environment env) {
-            int n = (int)List.First(args);
+            long n = System.Convert.ToInt64(List.First(args));
             return Boolean.Create(n == 0);
         }
     }
@@ -372,7 +370,7 @@ namespace Scheme {
 
     public class IntegerToChar : Procedure {
         public object Apply(Interpreter i, Pair args, Environment env) {
-            return (char)((int)List.First(args));
+            return new Character((char)System.Convert.ToInt64(List.First(args)));
         }
     }
 
@@ -480,7 +478,7 @@ namespace Scheme {
 
     public class NativeEval : Procedure {
         public object Apply(Interpreter i, Pair args, Environment env) {
-            return i.Execute(List.First(args), Pair.EmptyList, env);
+            return i.Execute(List.First(args), Pair.EmptyList, i.GlobalEnvironment);
         }
     }
 

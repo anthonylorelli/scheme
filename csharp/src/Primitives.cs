@@ -178,7 +178,14 @@ namespace Scheme {
 (define not (lambda (x) (if x #f #t)))
 
             ";
+            Source = s;
             Reader = new StringReader(s);
+        }
+
+        public static readonly string Source;
+
+        public static StringReader CreateReader() {
+            return new StringReader(Source);
         }
     }
 }
