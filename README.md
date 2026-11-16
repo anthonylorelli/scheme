@@ -29,7 +29,8 @@ The repository contains both the original **C# (.NET)** implementation and a com
 │   ├── benchmark.scm
 │   └── callcc.scm    # Continuation benchmark suite (tak, ctak, coroutines, etc.)
 └── doc/
-    └── Lorelli-Project-2006.pdf
+    ├── Lorelli-Project-2006.pdf
+    └── Performance-Comparison.md # Empirical C# vs. Rust benchmark & architectural analysis
 ```
 
 ## Building and Testing
