@@ -113,134 +113,148 @@ namespace Scheme {
         }
 
         public object Execute(object expr, Pair valueRib, Environment env) {
-            object instr = List.First(expr);
+            for (;;) {
+                object instr = List.First(expr);
 
-            if (instr == Instruction.Constant) {
-                return List.Second(expr);
-            } else if (instr == Instruction.Variable) {
-                object sym = List.Second(expr);
-                object varValue = env.Lookup((Symbol)sym);
-                if (varValue == null) {
-                    throw new System.Exception(
-                        "Error: no value associated with symbol " + sym
-                    );
-                } else {
-                    return varValue;
-                }
-            } else if (instr == Instruction.Conditional) {                
-                object cond = null;
-                try {
-                    cond = Execute(List.Second(expr), valueRib, env);
-                } catch (CaptureException capEx) {
-                    capEx.AddContext(new CondContext(this, 
-                        List.Third(expr), List.Fourth(expr), env));
-                    throw capEx;
-                }
-
-                object condResult = Execute(Boolean.IsTrue(cond) ?
-                    List.Third(expr) : List.Fourth(expr), 
-                    valueRib, env);
-                return condResult;
-            } else if (instr == Instruction.Closure) {
-                return new Closure(List.Second(expr),
-                    (Pair)List.Third(expr), env);
-            } else if (instr == Instruction.Assign) {
-                object assignVal = null;
-                Symbol id = (Symbol)List.Second(expr);
-                try {
-                    assignVal = Execute(List.Third(expr), valueRib, env);
-                } catch (CaptureException capEx) {
-                    capEx.AddContext(new AssignContext(this, id, env));
-                    throw;
-                }
-                if (env.Assign(id, assignVal)) {
-                    return null;
-                } else {
-                    throw new System.Exception(
-                        "Error: cannot set undefined identifier " + id
-                    );
-                }
-            } else if (instr == Instruction.Define) {
-                object defineVal = null;
-                Symbol id = (Symbol)List.Second(expr);
-                try {
-                    defineVal = Execute(List.Third(expr), valueRib, env);
-                } catch (CaptureException capEx) {
-                    capEx.AddContext(new DefineContext(this, id, env));
-                    throw;
-                }
-                env.Define(id, defineVal);
-                return null;
-            } else if (instr == Instruction.Context) {
-                return Execute(List.Second(expr), Pair.EmptyList, env);
-            } else if (instr == Instruction.Argument) {
-                Pair p = null;
-                try {
-                    object argRest = List.Third(expr);
-                    p = (argRest == Pair.EmptyList) ? Pair.EmptyList :
-                        (Pair)Execute(argRest, valueRib, env);
-                } catch (CaptureException capEx) {
-                    capEx.AddContext(new ArgContext(this, 
-                        List.Second(expr), env));
-                    throw;
-                }
-                object argVal;
-                try {
-                    argVal = Execute(List.Second(expr), valueRib, env);
-                } catch (CaptureException capEx) {
-                    capEx.AddContext(new RibContext(p));
-                    throw;
-                }
-                return new Pair(argVal, p);
-            } else if (instr == Instruction.Apply) {
-                Pair vRib = null;
-                try {
-                    object fnArgs = List.Third(expr);
-                    vRib = (fnArgs == Pair.EmptyList) ? Pair.EmptyList :
-                        (Pair)Execute(fnArgs, valueRib, env);
-                } catch (CaptureException capEx) {
-                    capEx.AddContext(new FuncContext(this, 
-                        List.Second(expr), env));
-                    throw;
-                }
-                object fn = null; 
-                try {
-                    fn = Execute(List.Second(expr), valueRib, env);
-                } catch (CaptureException capEx) {
-                    capEx.AddContext(new ApplyContext(this, vRib, env));
-                    throw;
-                }
-                Procedure proc = (Procedure)fn;
-                return proc.Apply(this, vRib, env);
-            } else if (instr == Instruction.ArgMultiple) {
-                object multArgVal;
-                try {
-                    multArgVal = Execute(List.Second(expr), valueRib, env);
-                } catch (CaptureException capEx) {
-                    capEx.AddContext(new MultArgContext());
-                    throw;
-                }
-                Pair newRib = (multArgVal is ValueList) ?
-                    ((ValueList)multArgVal).Values :
-                    (multArgVal != null) ? 
-                        new Pair(multArgVal, Pair.EmptyList) :
-                        Pair.EmptyList;
-                return newRib;
-            } else if (instr == Instruction.Sequence) {
-                try {
-                    object restSeq = List.Third(expr);
-                    if (restSeq != Pair.EmptyList) {
-                        Execute(restSeq, valueRib, env);
+                if (instr == Instruction.Constant) {
+                    return List.Second(expr);
+                } else if (instr == Instruction.Variable) {
+                    object sym = List.Second(expr);
+                    object varValue = env.Lookup((Symbol)sym);
+                    if (varValue == null) {
+                        throw new System.Exception(
+                            "Error: no value associated with symbol " + sym
+                        );
+                    } else {
+                        return varValue;
                     }
-                } catch (CaptureException capEx) {
-                    capEx.AddContext(new SeqContext(this, 
-                        List.Second(expr), env));
-                    throw;
+                } else if (instr == Instruction.Conditional) {                
+                    object cond = null;
+                    try {
+                        cond = Execute(List.Second(expr), valueRib, env);
+                    } catch (CaptureException capEx) {
+                        capEx.AddContext(new CondContext(this, 
+                            List.Third(expr), List.Fourth(expr), env));
+                        throw capEx;
+                    }
+
+                    expr = Boolean.IsTrue(cond) ?
+                        List.Third(expr) : List.Fourth(expr);
+                    continue;
+                } else if (instr == Instruction.Closure) {
+                    return new Closure(List.Second(expr),
+                        (Pair)List.Third(expr), env);
+                } else if (instr == Instruction.Assign) {
+                    object assignVal = null;
+                    Symbol id = (Symbol)List.Second(expr);
+                    try {
+                        assignVal = Execute(List.Third(expr), valueRib, env);
+                    } catch (CaptureException capEx) {
+                        capEx.AddContext(new AssignContext(this, id, env));
+                        throw;
+                    }
+                    if (env.Assign(id, assignVal)) {
+                        return null;
+                    } else {
+                        throw new System.Exception(
+                            "Error: cannot set undefined identifier " + id
+                        );
+                    }
+                } else if (instr == Instruction.Define) {
+                    object defineVal = null;
+                    Symbol id = (Symbol)List.Second(expr);
+                    try {
+                        defineVal = Execute(List.Third(expr), valueRib, env);
+                    } catch (CaptureException capEx) {
+                        capEx.AddContext(new DefineContext(this, id, env));
+                        throw;
+                    }
+                    env.Define(id, defineVal);
+                    return null;
+                } else if (instr == Instruction.Context) {
+                    expr = List.Second(expr);
+                    valueRib = Pair.EmptyList;
+                    continue;
+                } else if (instr == Instruction.Argument) {
+                    Pair p = null;
+                    try {
+                        object argRest = List.Third(expr);
+                        p = (argRest == Pair.EmptyList) ? Pair.EmptyList :
+                            (Pair)Execute(argRest, valueRib, env);
+                    } catch (CaptureException capEx) {
+                        capEx.AddContext(new ArgContext(this, 
+                            List.Second(expr), env));
+                        throw;
+                    }
+                    object argVal;
+                    try {
+                        argVal = Execute(List.Second(expr), valueRib, env);
+                    } catch (CaptureException capEx) {
+                        capEx.AddContext(new RibContext(p));
+                        throw;
+                    }
+                    return new Pair(argVal, p);
+                } else if (instr == Instruction.Apply) {
+                    Pair vRib = null;
+                    try {
+                        object fnArgs = List.Third(expr);
+                        vRib = (fnArgs == Pair.EmptyList) ? Pair.EmptyList :
+                            (Pair)Execute(fnArgs, valueRib, env);
+                    } catch (CaptureException capEx) {
+                        capEx.AddContext(new FuncContext(this, 
+                            List.Second(expr), env));
+                        throw;
+                    }
+                    object fn = null; 
+                    try {
+                        fn = Execute(List.Second(expr), valueRib, env);
+                    } catch (CaptureException capEx) {
+                        capEx.AddContext(new ApplyContext(this, vRib, env));
+                        throw;
+                    }
+                    Procedure proc = (Procedure)fn;
+                    while (proc is ApplyProc) {
+                        proc = (Procedure)List.First(vRib);
+                        vRib = List.Flatten((Pair)List.Rest(vRib));
+                    }
+                    if (proc is Closure closure) {
+                        env = closure.BindArguments(vRib);
+                        expr = closure.Body;
+                        valueRib = Pair.EmptyList;
+                        continue;
+                    }
+                    return proc.Apply(this, vRib, env);
+                } else if (instr == Instruction.ArgMultiple) {
+                    object multArgVal;
+                    try {
+                        multArgVal = Execute(List.Second(expr), valueRib, env);
+                    } catch (CaptureException capEx) {
+                        capEx.AddContext(new MultArgContext());
+                        throw;
+                    }
+                    Pair newRib = (multArgVal is ValueList) ?
+                        ((ValueList)multArgVal).Values :
+                        (multArgVal != null) ? 
+                            new Pair(multArgVal, Pair.EmptyList) :
+                            Pair.EmptyList;
+                    return newRib;
+                } else if (instr == Instruction.Sequence) {
+                    try {
+                        object restSeq = List.Third(expr);
+                        if (restSeq != Pair.EmptyList) {
+                            Execute(restSeq, valueRib, env);
+                        }
+                    } catch (CaptureException capEx) {
+                        capEx.AddContext(new SeqContext(this, 
+                            List.Second(expr), env));
+                        throw;
+                    }
+                    expr = List.Second(expr);
+                    continue;
+                } else {
+                    throw new System.Exception("Unexpected value: " + 
+                        ((instr==null)?"[null]":instr));
                 }
-                return Execute(List.Second(expr), valueRib, env);
-            } else {
-                throw new System.Exception("Unexpected value: " + 
-                    ((instr==null)?"[null]":instr));
             }
         }
 

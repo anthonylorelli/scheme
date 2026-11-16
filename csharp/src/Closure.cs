@@ -32,9 +32,17 @@ namespace Scheme {
                         new Pair(args.Tail, Pair.EmptyList));
         }
 
-        public object Apply(Interpreter i, Pair args, Environment env) {
+        public Pair Body {
+            get { return _exp; }
+        }
+
+        public Environment BindArguments(Pair args) {
             Pair p = (_variableArity) ? _SeparateValues(args, 0) : args;
-            Environment cenv = new Environment(_args, p, _env);               
+            return new Environment(_args, p, _env);
+        }
+
+        public object Apply(Interpreter i, Pair args, Environment env) {
+            Environment cenv = BindArguments(args);
 
             return i.Execute(_exp, Pair.EmptyList, cenv);
         }
