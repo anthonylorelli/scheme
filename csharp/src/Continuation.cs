@@ -11,8 +11,11 @@ namespace Scheme {
         }
 
         public object Apply(Interpreter i, Pair args, Environment env) {
+            long len = List.Length(args);
+            object retVal = (len > 1) ? new ValueList(args) :
+                (len == 1) ? List.First(args) : null;
             InvokeException invEx = 
-                new InvokeException(List.First(args), _cList);
+                new InvokeException(retVal, _cList);
             throw invEx;
         }
     }

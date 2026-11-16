@@ -22,6 +22,7 @@ The repository contains both the original **C# (.NET)** implementation and a com
 │   └── init.scm      # Runtime helpers, benchmark harness, and define-macro
 ├── test/             # Shared Scheme tests and continuation benchmarks
 │   ├── suite.scm     # End-to-end R5RS, macro, and continuation test suite
+│   ├── continuations.scm # Exhaustive first-class continuation test suite (32 checks)
 │   ├── test.scm      # Macro expansion & evaluation smoke tests
 │   ├── coroutines.scm
 │   ├── exceptions.scm

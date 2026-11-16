@@ -42,7 +42,8 @@ namespace Scheme {
             SymbolFactory.Create("make-vector"), SymbolFactory.Create("vector-set!"),
             SymbolFactory.Create("_get-ticks"), SymbolFactory.Create("/"),
             SymbolFactory.Create("call-with-current-continuation"),
-            SymbolFactory.Create("_compile"), SymbolFactory.Create("char?")
+            SymbolFactory.Create("_compile"), SymbolFactory.Create("char?"),
+            SymbolFactory.Create("*")
         };
 
         private static Procedure[] _procs = {
@@ -59,7 +60,7 @@ namespace Scheme {
             new ListProc(), new NumberPred(), new NativeEval(), new GenSymProc(),
             new GenSymPred(), new ListToVector(), new MakeVector(), new VectorSet(),
             new GetTicksProc(), new DivProc(), new CallCC(), new CompileProc(),
-            new CharPred()
+            new CharPred(), new Multiply()
         };
 
         private StandardLibrary() {
@@ -376,37 +377,43 @@ namespace Scheme {
 
     public class Add : Procedure {
         public object Apply(Interpreter i, Pair args, Environment env) {
-            object n1 = List.First(args);
-            object n2 = List.Second(args);
-            if (n1 is int && n2 is int) {
-                int i1 = (int)n1;
-                int i2 = (int)n2;
-                return i1 + i2;
-            } else if (n1 is long && n2 is long) {
-                long l1 = (long)n1;
-                long l2 = (long)n2;
-                return l1 + l2;
+            long sum = 0L;
+            Pair cur = args;
+            while (cur != Pair.EmptyList) {
+                sum += System.Convert.ToInt64(cur.Head);
+                cur = (Pair)cur.Tail;
             }
-
-            throw new System.Exception("Unrecognized addition");
+            return sum;
         }
     }
 
     public class Subtract : Procedure {
         public object Apply(Interpreter i, Pair args, Environment env) {
-            object n1 = List.First(args);
-            object n2 = List.Second(args);
-            if (n1 is int && n2 is int) {
-                int i1 = (int)n1;
-                int i2 = (int)n2;
-                return i1 - i2;
-            } else if (n1 is long && n2 is long) {
-                long l1 = (long)n1;
-                long l2 = (long)n2;
-                return l1 - l2;
+            if (args == Pair.EmptyList) {
+                throw new System.Exception("- expects at least 1 argument");
             }
+            long acc = System.Convert.ToInt64(args.Head);
+            Pair cur = (Pair)args.Tail;
+            if (cur == Pair.EmptyList) {
+                return -acc;
+            }
+            while (cur != Pair.EmptyList) {
+                acc -= System.Convert.ToInt64(cur.Head);
+                cur = (Pair)cur.Tail;
+            }
+            return acc;
+        }
+    }
 
-            throw new System.Exception("Unrecognized subtraction");
+    public class Multiply : Procedure {
+        public object Apply(Interpreter i, Pair args, Environment env) {
+            long prod = 1L;
+            Pair cur = args;
+            while (cur != Pair.EmptyList) {
+                prod *= System.Convert.ToInt64(cur.Head);
+                cur = (Pair)cur.Tail;
+            }
+            return prod;
         }
     }
 
