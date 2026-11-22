@@ -1,67 +1,88 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::symbol::Symbol;
 use crate::value::Value;
 
-pub type Env = Rc<RefCell<EnvFrame>>;
+pub const SMALL_SLOTS: usize = 4;
+
+pub type Env = Option<Rc<EnvFrame>>;
+
+#[derive(Debug)]
+enum FrameSlots {
+    Inline([Value; SMALL_SLOTS]),
+    Heap(Vec<Value>),
+}
 
 #[derive(Debug)]
 pub struct EnvFrame {
-    bindings: HashMap<Symbol, Value>,
-    parent: Option<Env>,
+    slots: RefCell<FrameSlots>,
+    parent: Env,
 }
 
 impl EnvFrame {
-    pub fn new_root() -> Env {
-        Rc::new(RefCell::new(Self {
-            bindings: HashMap::new(),
-            parent: None,
-        }))
+    #[inline]
+    pub fn empty_top_level() -> Env {
+        None
     }
 
-    pub fn with_capacity_and_parent(cap: usize, parent: Option<Env>) -> Env {
-        Rc::new(RefCell::new(Self {
-            bindings: HashMap::with_capacity(cap),
+    #[inline]
+    pub fn from_inline_slots(buf: [Value; SMALL_SLOTS], parent: Env) -> Env {
+        Some(Rc::new(Self {
+            slots: RefCell::new(FrameSlots::Inline(buf)),
             parent,
         }))
     }
 
-    pub fn lookup(env: &Env, sym: &Symbol) -> Option<Value> {
-        let mut cur = Some(env.clone());
-        while let Some(frame_rc) = cur {
-            let frame = frame_rc.borrow();
-            if let Some(val) = frame.bindings.get(sym) {
-                return Some(val.clone());
-            }
-            cur = frame.parent.clone();
+    #[inline]
+    pub fn from_slots(slots: Vec<Value>, parent: Env) -> Env {
+        Some(Rc::new(Self {
+            slots: RefCell::new(FrameSlots::Heap(slots)),
+            parent,
+        }))
+    }
+
+    #[inline]
+    pub fn with_void_slots(count: usize, parent: Env) -> Env {
+        let slots = if count <= SMALL_SLOTS {
+            FrameSlots::Inline([Value::Void, Value::Void, Value::Void, Value::Void])
+        } else {
+            FrameSlots::Heap(vec![Value::Void; count])
+        };
+        Some(Rc::new(Self {
+            slots: RefCell::new(slots),
+            parent,
+        }))
+    }
+
+    #[inline]
+    fn frame_at(env: &Env, depth: u32) -> &EnvFrame {
+        let mut cur = env
+            .as_deref()
+            .expect("lexical address depth exceeded environment chain");
+        for _ in 0..depth {
+            cur = cur
+                .parent
+                .as_deref()
+                .expect("lexical address depth exceeded environment chain");
         }
-        None
+        cur
     }
 
-    pub fn assign(env: &Env, sym: &Symbol, val: Value) -> bool {
-        let mut cur = Some(env.clone());
-        while let Some(frame_rc) = cur {
-            let mut frame = frame_rc.borrow_mut();
-            if let Some(slot) = frame.bindings.get_mut(sym) {
-                *slot = val;
-                return true;
-            }
-            cur = frame.parent.clone();
+    #[inline]
+    pub fn lookup_local(env: &Env, depth: u32, slot: u32) -> Value {
+        let frame = Self::frame_at(env, depth);
+        match &*frame.slots.borrow() {
+            FrameSlots::Inline(buf) => buf[slot as usize].clone(),
+            FrameSlots::Heap(vec) => vec[slot as usize].clone(),
         }
-        false
     }
 
-    pub fn define(env: &Env, sym: Symbol, val: Value) {
-        env.borrow_mut().bindings.insert(sym, val);
-    }
-
-    pub fn define_in_place(&mut self, sym: Symbol, val: Value) {
-        self.bindings.insert(sym, val);
-    }
-
-    pub fn clear(env: &Env) {
-        env.borrow_mut().bindings.clear();
+    #[inline]
+    pub fn assign_local(env: &Env, depth: u32, slot: u32, val: Value) {
+        let frame = Self::frame_at(env, depth);
+        match &mut *frame.slots.borrow_mut() {
+            FrameSlots::Inline(buf) => buf[slot as usize] = val,
+            FrameSlots::Heap(vec) => vec[slot as usize] = val,
+        }
     }
 }

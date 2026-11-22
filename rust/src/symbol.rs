@@ -10,6 +10,7 @@ struct SymbolInner {
     name: String,
     is_gensym: bool,
     props: RefCell<HashMap<Symbol, Value>>,
+    global_val: RefCell<Option<Value>>,
 }
 
 #[derive(Clone)]
@@ -21,6 +22,7 @@ impl Symbol {
             name: name.into(),
             is_gensym,
             props: RefCell::new(HashMap::new()),
+            global_val: RefCell::new(None),
         }))
     }
 
@@ -30,6 +32,31 @@ impl Symbol {
 
     pub fn is_gensym(&self) -> bool {
         self.0.is_gensym
+    }
+
+    #[inline]
+    pub fn get_global(&self) -> Option<Value> {
+        self.0.global_val.borrow().clone()
+    }
+
+    #[inline]
+    pub fn define_global(&self, val: Value) {
+        *self.0.global_val.borrow_mut() = Some(val);
+    }
+
+    #[inline]
+    pub fn assign_global(&self, val: Value) -> bool {
+        let mut slot = self.0.global_val.borrow_mut();
+        if slot.is_some() {
+            *slot = Some(val);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn clear_global(&self) {
+        *self.0.global_val.borrow_mut() = None;
     }
 
     pub fn put_prop(&self, key: Symbol, val: Value) {
@@ -167,6 +194,12 @@ impl SymbolTable {
     pub fn clear_all_properties(&self) {
         for sym in self.table.values() {
             sym.clear_props();
+        }
+    }
+
+    pub fn clear_all_globals(&self) {
+        for sym in self.table.values() {
+            sym.clear_global();
         }
     }
 }

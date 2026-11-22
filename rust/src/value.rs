@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use crate::continuation::Continuation;
 use crate::env::Env;
-use crate::instruction::{Expr, Formals};
+use crate::instruction::{Arity, Expr};
 use crate::interpreter::{Interpreter, Signal};
 use crate::symbol::Symbol;
 
@@ -24,7 +24,9 @@ pub struct NativeProcedure {
 
 #[derive(Clone)]
 pub struct Closure {
-    pub formals: Formals,
+    pub arity: Arity,
+    pub extra_locals: usize,
+    pub has_frame: bool,
     pub args_display: Value,
     pub body: Rc<Expr>,
     pub env: Env,
@@ -76,11 +78,13 @@ pub enum Value {
     Pair(Rc<RefCell<Pair>>),
     Vector(Rc<RefCell<Vec<Value>>>),
     Procedure(Procedure),
-    Values(Vec<Value>),
+    Values(Box<Vec<Value>>),
     Compiled(Rc<Expr>),
     /// Internal carrier for evaluated argument ribs during continuation resumption.
-    Rib(Vec<Value>),
+    Rib(Box<Vec<Value>>),
 }
+
+const _: () = assert!(std::mem::size_of::<Value>() == 16);
 
 impl Value {
     pub fn cons(head: Value, tail: Value) -> Self {

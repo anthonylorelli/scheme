@@ -13,13 +13,16 @@ pub enum Context {
         alternate: Rc<Expr>,
         env: Env,
     },
-    Assign {
-        id: Symbol,
+    AssignLocal {
+        depth: u32,
+        slot: u32,
         env: Env,
     },
-    Define {
+    AssignGlobal {
         id: Symbol,
-        env: Env,
+    },
+    DefineGlobal {
+        id: Symbol,
     },
     ArgEval {
         remaining_left: Vec<Rc<Expr>>,

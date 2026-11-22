@@ -7,8 +7,8 @@ use std::rc::Rc;
 use crate::compiler::Compiler;
 use crate::context::Context;
 use crate::continuation::Continuation;
-use crate::env::{Env, EnvFrame};
-use crate::instruction::{ApplyArgs, Expr, Formals};
+use crate::env::{Env, EnvFrame, SMALL_SLOTS};
+use crate::instruction::{ApplyArgs, Arity, Expr};
 use crate::macro_expander::MacroExpander;
 use crate::parser::Parser;
 use crate::primitives::{EMBEDDED_INIT_SCM, EMBEDDED_PSYNTAX_PP, PRIMITIVES_SCM};
@@ -16,6 +16,46 @@ use crate::scanner::Scanner;
 use crate::stdlib::register_standard_library;
 use crate::symbol::SymbolTable;
 use crate::value::{Closure, Procedure, Value};
+
+enum SmallArgs {
+    Inline {
+        len: usize,
+        buf: [Value; SMALL_SLOTS],
+    },
+    Heap(Vec<Value>),
+}
+
+impl SmallArgs {
+    #[inline]
+    fn len(&self) -> usize {
+        match self {
+            Self::Inline { len, .. } => *len,
+            Self::Heap(v) => v.len(),
+        }
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[Value] {
+        match self {
+            Self::Inline { len, buf } => &buf[..*len],
+            Self::Heap(v) => v.as_slice(),
+        }
+    }
+
+    #[inline]
+    fn into_vec(self) -> Vec<Value> {
+        match self {
+            Self::Inline { len, mut buf } => {
+                let mut v = Vec::with_capacity(len);
+                for slot in buf.iter_mut().take(len) {
+                    v.push(std::mem::replace(slot, Value::Void));
+                }
+                v
+            }
+            Self::Heap(v) => v,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum Signal {
@@ -47,8 +87,8 @@ impl Interpreter {
     /// `psyntax.pp`, or `init.scm` loaded yet).
     pub fn new_bare() -> Self {
         let symbols = Rc::new(RefCell::new(SymbolTable::new()));
-        let global_env = EnvFrame::new_root();
-        register_standard_library(&mut symbols.borrow_mut(), &global_env);
+        let global_env = EnvFrame::empty_top_level();
+        register_standard_library(&mut symbols.borrow_mut());
         Self {
             symbols,
             global_env,
@@ -306,7 +346,7 @@ impl Interpreter {
 
     fn unpack_multiple_values(val: Value) -> Vec<Value> {
         match val {
-            Value::Values(vs) => vs,
+            Value::Values(vs) => *vs,
             Value::Void => Vec::new(),
             other => vec![other],
         }
@@ -327,8 +367,12 @@ impl Interpreter {
                 };
                 self.execute(branch, env.clone())
             }
-            Context::Assign { id, env } => {
-                if EnvFrame::assign(env, id, val) {
+            Context::AssignLocal { depth, slot, env } => {
+                EnvFrame::assign_local(env, *depth, *slot, val);
+                Ok(Value::Void)
+            }
+            Context::AssignGlobal { id } => {
+                if id.assign_global(val) {
                     Ok(Value::Void)
                 } else {
                     Err(Signal::Error(format!(
@@ -336,8 +380,8 @@ impl Interpreter {
                     )))
                 }
             }
-            Context::Define { id, env } => {
-                EnvFrame::define(env, id.clone(), val);
+            Context::DefineGlobal { id } => {
+                id.define_global(val);
                 Ok(Value::Void)
             }
             Context::ArgEval {
@@ -348,11 +392,11 @@ impl Interpreter {
                 let mut rev = evaluated_rev.clone();
                 rev.push(val);
                 let args = self.eval_normal_args_from(remaining_left, rev, env)?;
-                Ok(Value::Rib(args))
+                Ok(Value::Rib(Box::new(args)))
             }
             Context::Func { rator, env } => {
                 let args_rib = match val {
-                    Value::Rib(r) => r,
+                    Value::Rib(r) => *r,
                     other => vec![other],
                 };
                 let fn_val = match self.execute(rator.clone(), env.clone()) {
@@ -388,7 +432,7 @@ impl Interpreter {
                 self.apply_procedure(&proc, args_rib.clone(), env)
             }
             Context::Seq { next, env } => self.execute(next.clone(), env.clone()),
-            Context::MultArg => Ok(Value::Rib(Self::unpack_multiple_values(val))),
+            Context::MultArg => Ok(Value::Rib(Box::new(Self::unpack_multiple_values(val)))),
         }
     }
 
@@ -416,46 +460,91 @@ impl Interpreter {
         Ok(evaluated_rev)
     }
 
-    fn bind_closure_env(closure: &Closure, args: Vec<Value>) -> Result<Env, Signal> {
-        match &closure.formals {
-            Formals::Fixed(params) => {
-                if args.len() != params.len() {
+    #[inline]
+    fn bind_closure_env(closure: &Closure, mut args: Vec<Value>) -> Result<Env, Signal> {
+        match closure.arity {
+            Arity::Fixed(expected) => {
+                if args.len() != expected {
                     return Err(Signal::Error(format!(
-                        "Arity mismatch: expected {} argument(s), got {}",
-                        params.len(),
+                        "Arity mismatch: expected {expected} argument(s), got {}",
                         args.len()
                     )));
                 }
-                let cenv =
-                    EnvFrame::with_capacity_and_parent(params.len(), Some(closure.env.clone()));
-                {
-                    let mut frame = cenv.borrow_mut();
-                    for (sym, val) in params.iter().zip(args) {
-                        frame.define_in_place(sym.clone(), val);
-                    }
+                if !closure.has_frame {
+                    return Ok(closure.env.clone());
                 }
-                Ok(cenv)
+                if closure.extra_locals > 0 {
+                    args.resize(expected + closure.extra_locals, Value::Void);
+                }
+                Ok(EnvFrame::from_slots(args, closure.env.clone()))
             }
-            Formals::Variadic { fixed, rest } => {
-                if args.len() < fixed.len() {
+            Arity::Variadic { fixed } => {
+                if args.len() < fixed {
                     return Err(Signal::Error(format!(
-                        "Arity mismatch: expected at least {} argument(s), got {}",
-                        fixed.len(),
+                        "Arity mismatch: expected at least {fixed} argument(s), got {}",
                         args.len()
                     )));
                 }
-                let cenv =
-                    EnvFrame::with_capacity_and_parent(fixed.len() + 1, Some(closure.env.clone()));
-                let mut iter = args.into_iter();
-                {
-                    let mut frame = cenv.borrow_mut();
-                    for sym in fixed {
-                        frame.define_in_place(sym.clone(), iter.next().unwrap());
-                    }
-                    let rest_list = Value::list_from_vec(iter.collect());
-                    frame.define_in_place(rest.clone(), rest_list);
+                let mut rest_list = Value::EmptyList;
+                for item in args.drain(fixed..).rev() {
+                    rest_list = Value::cons(item, rest_list);
                 }
-                Ok(cenv)
+                args.push(rest_list);
+                if closure.extra_locals > 0 {
+                    args.resize(fixed + 1 + closure.extra_locals, Value::Void);
+                }
+                Ok(EnvFrame::from_slots(args, closure.env.clone()))
+            }
+        }
+    }
+
+    #[inline]
+    fn bind_closure_env_small(closure: &Closure, args: SmallArgs) -> Result<Env, Signal> {
+        match closure.arity {
+            Arity::Fixed(expected) => {
+                let argc = args.len();
+                if argc != expected {
+                    return Err(Signal::Error(format!(
+                        "Arity mismatch: expected {expected} argument(s), got {argc}"
+                    )));
+                }
+                if !closure.has_frame {
+                    return Ok(closure.env.clone());
+                }
+                let total = expected + closure.extra_locals;
+                match args {
+                    SmallArgs::Inline { buf, .. } if total <= SMALL_SLOTS => {
+                        Ok(EnvFrame::from_inline_slots(buf, closure.env.clone()))
+                    }
+                    other => {
+                        let mut v = other.into_vec();
+                        if closure.extra_locals > 0 {
+                            v.resize(total, Value::Void);
+                        }
+                        Ok(EnvFrame::from_slots(v, closure.env.clone()))
+                    }
+                }
+            }
+            Arity::Variadic { fixed } => {
+                let argc = args.len();
+                if argc < fixed {
+                    return Err(Signal::Error(format!(
+                        "Arity mismatch: expected at least {fixed} argument(s), got {argc}"
+                    )));
+                }
+                let total = fixed + 1 + closure.extra_locals;
+                match args {
+                    SmallArgs::Inline { len, mut buf } if total <= SMALL_SLOTS => {
+                        let mut rest_list = Value::EmptyList;
+                        for idx in (fixed..len).rev() {
+                            let item = std::mem::replace(&mut buf[idx], Value::Void);
+                            rest_list = Value::cons(item, rest_list);
+                        }
+                        buf[fixed] = rest_list;
+                        Ok(EnvFrame::from_inline_slots(buf, closure.env.clone()))
+                    }
+                    other => Self::bind_closure_env(closure, other.into_vec()),
+                }
             }
         }
     }
@@ -476,7 +565,7 @@ impl Interpreter {
                 let val = match args.len() {
                     0 => Value::Void,
                     1 => args.into_iter().next().unwrap(),
-                    _ => Value::Values(args),
+                    _ => Value::Values(Box::new(args)),
                 };
                 Err(Signal::Invoke {
                     k_frames: k.frames().clone(),
@@ -490,8 +579,11 @@ impl Interpreter {
         loop {
             match expr.as_ref() {
                 Expr::Constant(val) => return Ok(val.clone()),
-                Expr::Variable(sym) => {
-                    return EnvFrame::lookup(&env, sym).ok_or_else(|| {
+                Expr::LocalVar { depth, slot } => {
+                    return Ok(EnvFrame::lookup_local(&env, *depth, *slot));
+                }
+                Expr::GlobalVar(sym) => {
+                    return sym.get_global().ok_or_else(|| {
                         Signal::Error(format!("Error: no value associated with symbol {sym}"))
                     });
                 }
@@ -519,33 +611,55 @@ impl Interpreter {
                     };
                 }
                 Expr::Closure {
-                    formals,
+                    arity,
+                    extra_locals,
+                    has_frame,
                     args_display,
                     body,
                 } => {
                     return Ok(Value::Procedure(Procedure::Closure(Rc::new(Closure {
-                        formals: formals.clone(),
+                        arity: *arity,
+                        extra_locals: *extra_locals,
+                        has_frame: *has_frame,
                         args_display: args_display.clone(),
                         body: body.clone(),
                         env: env.clone(),
                     }))));
                 }
-                Expr::Assign {
-                    id,
+                Expr::PushFrame { slot_count, body } => {
+                    env = EnvFrame::with_void_slots(*slot_count, env);
+                    expr = body.clone();
+                }
+                Expr::AssignLocal {
+                    depth,
+                    slot,
                     expr: val_expr,
                 } => {
                     let val = match self.execute(val_expr.clone(), env.clone()) {
                         Ok(v) => v,
                         Err(Signal::Capture { proc, mut frames }) => {
-                            frames.push(Context::Assign {
-                                id: id.clone(),
+                            frames.push(Context::AssignLocal {
+                                depth: *depth,
+                                slot: *slot,
                                 env: env.clone(),
                             });
                             return Err(Signal::Capture { proc, frames });
                         }
                         Err(other) => return Err(other),
                     };
-                    if EnvFrame::assign(&env, id, val) {
+                    EnvFrame::assign_local(&env, *depth, *slot, val);
+                    return Ok(Value::Void);
+                }
+                Expr::AssignGlobal { id, expr: val_expr } => {
+                    let val = match self.execute(val_expr.clone(), env.clone()) {
+                        Ok(v) => v,
+                        Err(Signal::Capture { proc, mut frames }) => {
+                            frames.push(Context::AssignGlobal { id: id.clone() });
+                            return Err(Signal::Capture { proc, frames });
+                        }
+                        Err(other) => return Err(other),
+                    };
+                    if id.assign_global(val) {
                         return Ok(Value::Void);
                     } else {
                         return Err(Signal::Error(format!(
@@ -553,22 +667,16 @@ impl Interpreter {
                         )));
                     }
                 }
-                Expr::Define {
-                    id,
-                    expr: val_expr,
-                } => {
+                Expr::DefineGlobal { id, expr: val_expr } => {
                     let val = match self.execute(val_expr.clone(), env.clone()) {
                         Ok(v) => v,
                         Err(Signal::Capture { proc, mut frames }) => {
-                            frames.push(Context::Define {
-                                id: id.clone(),
-                                env: env.clone(),
-                            });
+                            frames.push(Context::DefineGlobal { id: id.clone() });
                             return Err(Signal::Capture { proc, frames });
                         }
                         Err(other) => return Err(other),
                     };
-                    EnvFrame::define(&env, id.clone(), val);
+                    id.define_global(val);
                     return Ok(Value::Void);
                 }
                 Expr::Sequence { first, rest } => {
@@ -587,13 +695,44 @@ impl Interpreter {
                 }
                 Expr::Apply { rator, args } => {
                     let args_rib = match args {
+                        ApplyArgs::Normal(rand_exprs) if rand_exprs.len() <= SMALL_SLOTS => {
+                            let n = rand_exprs.len();
+                            let mut buf = [Value::Void, Value::Void, Value::Void, Value::Void];
+                            for idx in (0..n).rev() {
+                                match self.execute(rand_exprs[idx].clone(), env.clone()) {
+                                    Ok(v) => buf[idx] = v,
+                                    Err(Signal::Capture { proc, mut frames }) => {
+                                        let mut evaluated_rev =
+                                            Vec::with_capacity(n - idx - 1);
+                                        for done_idx in ((idx + 1)..n).rev() {
+                                            evaluated_rev.push(std::mem::replace(
+                                                &mut buf[done_idx],
+                                                Value::Void,
+                                            ));
+                                        }
+                                        frames.push(Context::ArgEval {
+                                            remaining_left: rand_exprs[..idx].to_vec(),
+                                            evaluated_rev,
+                                            env: env.clone(),
+                                        });
+                                        frames.push(Context::Func {
+                                            rator: rator.clone(),
+                                            env: env.clone(),
+                                        });
+                                        return Err(Signal::Capture { proc, frames });
+                                    }
+                                    Err(other) => return Err(other),
+                                }
+                            }
+                            SmallArgs::Inline { len: n, buf }
+                        }
                         ApplyArgs::Normal(rand_exprs) => {
                             match self.eval_normal_args_from(
                                 rand_exprs,
                                 Vec::with_capacity(rand_exprs.len()),
                                 &env,
                             ) {
-                                Ok(rib) => rib,
+                                Ok(rib) => SmallArgs::Heap(rib),
                                 Err(Signal::Capture { proc, mut frames }) => {
                                     frames.push(Context::Func {
                                         rator: rator.clone(),
@@ -606,7 +745,9 @@ impl Interpreter {
                         }
                         ApplyArgs::Multiple(producer) => {
                             match self.execute(producer.clone(), env.clone()) {
-                                Ok(mult_val) => Self::unpack_multiple_values(mult_val),
+                                Ok(mult_val) => {
+                                    SmallArgs::Heap(Self::unpack_multiple_values(mult_val))
+                                }
                                 Err(Signal::Capture { proc, mut frames }) => {
                                     frames.push(Context::MultArg);
                                     frames.push(Context::Func {
@@ -624,7 +765,7 @@ impl Interpreter {
                         Ok(v) => v,
                         Err(Signal::Capture { proc, mut frames }) => {
                             frames.push(Context::Apply {
-                                args_rib,
+                                args_rib: args_rib.into_vec(),
                                 env: env.clone(),
                             });
                             return Err(Signal::Capture { proc, frames });
@@ -643,12 +784,25 @@ impl Interpreter {
 
                     match proc {
                         Procedure::Closure(closure) => {
-                            let cenv = Self::bind_closure_env(&closure, args_rib)?;
+                            let cenv = Self::bind_closure_env_small(&closure, args_rib)?;
                             expr = closure.body.clone();
                             env = cenv;
                         }
-                        other_proc => {
-                            return self.apply_procedure(&other_proc, args_rib, &env);
+                        Procedure::Native(native) => {
+                            return (native.func)(self, args_rib.as_slice(), &env);
+                        }
+                        Procedure::Continuation(k) => {
+                            let val = match args_rib {
+                                SmallArgs::Inline { len: 0, .. } => Value::Void,
+                                SmallArgs::Inline { len: 1, mut buf } => {
+                                    std::mem::replace(&mut buf[0], Value::Void)
+                                }
+                                other => Value::Values(Box::new(other.into_vec())),
+                            };
+                            return Err(Signal::Invoke {
+                                k_frames: k.frames().clone(),
+                                val,
+                            });
                         }
                     }
                 }
@@ -659,7 +813,8 @@ impl Interpreter {
 
 impl Drop for Interpreter {
     fn drop(&mut self) {
-        self.symbols.borrow().clear_all_properties();
-        EnvFrame::clear(&self.global_env);
+        let symbols = self.symbols.borrow();
+        symbols.clear_all_properties();
+        symbols.clear_all_globals();
     }
 }
