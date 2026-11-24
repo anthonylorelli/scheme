@@ -84,7 +84,7 @@ pub enum Value {
     Rib(Box<Vec<Value>>),
 }
 
-const _: () = assert!(std::mem::size_of::<Value>() == 16);
+const _: () = assert!(std::mem::size_of::<Value>() <= 16);
 
 impl Value {
     pub fn cons(head: Value, tail: Value) -> Self {

@@ -37,6 +37,7 @@ Following the addition of **compile-time lexical addressing (`(depth, slot)`)**,
 2. **JIT & Cache Warmup**: Every in-process microbenchmark executes untimed warmup iterations inside the same process prior to timed iterations so .NET 10's Tiered Compilation promotes hot methods (`Interpreter.Execute`, `Closure.BindArguments`, `Environment.Lookup`, etc.) to optimized Tier-1 native code before timing begins.
 3. **High-Resolution In-Process Timing**: Microbenchmarks use `(time thunk)` from [`lib/init.scm`](../lib/init.scm) backed by `_get-ticks` (`100 ns` tick resolution in both `DateTime.UtcNow.Ticks` and `SystemTime::now()`), excluding stdout `display` I/O from timed regions.
 4. **Memory**: Peak Resident Set Size (RSS) is measured over the full benchmark run via `/usr/bin/time -v`.
+5. **Cross-Run Baseline Note**: C# (`.NET 10 Release`) numbers are carried over from the prior benchmark run on the identical hardware and OS specification (`Intel Xeon Platinum 8481C`, Debian 12, Linux `6.12.105+`), while all Rust before/after figures in Sections 3–5 were freshly measured on the same machine.
 
 ---
 
@@ -135,7 +136,7 @@ Both interpreters implement **stack reconstruction** rather than CPS conversion 
 
 3. **Compiled Typed AST (`enum Expr`) vs. S-Expression Instruction Lists**:
    - In **C#** ([`csharp/src/Compiler.cs`](../csharp/src/Compiler.cs)), compiled bytecode instructions are represented as linked `Pair` lists (`List.First(expr) == Instruction.Apply`, `List.Second(expr)`, `List.Third(expr)`), requiring pointer chasing on every AST dispatch and during macro expansion (`psyntax.pp`).
-   - In **Rust** ([`rust/src/compiler.rs`](../rust/src/compiler.rs)), compiled expressions are compact typed `Expr` enums (`Expr::Constant`, `Expr::LocalVar`, `Expr::GlobalVar`, `Expr::Cond`, `Expr::Apply`, etc.), improving cache locality and contributing to the **5.52x faster** execution on macro-heavy suites like [`test/continuations.scm`](../test/continuations.scm).
+   - In **Rust** ([`rust/src/compiler.rs`](../rust/src/compiler.rs)), compiled expressions are compact typed `Expr` enums (`Expr::Constant`, `Expr::LocalVar`, `Expr::GlobalVar`, `Expr::Conditional`, `Expr::Apply`, etc.), improving cache locality and contributing to the **5.52x faster** execution on macro-heavy suites like [`test/continuations.scm`](../test/continuations.scm).
 
 ---
 

@@ -6,9 +6,10 @@ use crate::value::Value;
 
 struct CompileScope {
     names: Vec<Symbol>,
-    /// While compiling letrec initializers synchronously, slots >= limit are not yet
-    /// initialized unless accessed from inside a nested lambda.
-    sync_visible_limit: Option<usize>,
+    /// While compiling `letrec` initializers synchronously, tracks which slots have already
+    /// been initialized (either by a prior `letrec` binding or an internal `define`).
+    /// Uninitialized slots are skipped unless accessed from inside a nested `lambda`.
+    sync_initialized: Option<Vec<bool>>,
     is_lambda: bool,
     pushes_runtime_frame: bool,
 }
@@ -32,12 +33,14 @@ impl Compiler {
         let mut runtime_depth: u32 = 0;
         for scope in scopes.iter().rev() {
             if scope.pushes_runtime_frame {
-                let search_len = match scope.sync_visible_limit {
-                    Some(limit) if !crossed_lambda => limit,
-                    _ => scope.names.len(),
-                };
-                if let Some(slot) = scope.names[..search_len].iter().rposition(|s| s == sym) {
-                    return Some((runtime_depth, slot as u32));
+                if let Some(slot) = scope.names.iter().rposition(|s| s == sym) {
+                    let visible = match &scope.sync_initialized {
+                        Some(init) if !crossed_lambda => init[slot],
+                        _ => true,
+                    };
+                    if visible {
+                        return Some((runtime_depth, slot as u32));
+                    }
                 }
                 runtime_depth += 1;
             }
@@ -247,7 +250,7 @@ impl Compiler {
 
         scopes.push(CompileScope {
             names,
-            sync_visible_limit: None,
+            sync_initialized: None,
             is_lambda: true,
             pushes_runtime_frame: has_frame,
         });
@@ -331,17 +334,19 @@ impl Compiler {
             (id, expr)
         };
 
-        if let Some(scope) = scopes.last() {
+        if let Some(scope) = scopes.last_mut() {
             debug_assert!(scope.pushes_runtime_frame);
             let slot = scope
                 .names
                 .iter()
                 .rposition(|s| s == &id)
-                .expect("internal define was not pre-collected into enclosing frame")
-                as u32;
+                .expect("internal define was not pre-collected into enclosing frame");
+            if let Some(init) = &mut scope.sync_initialized {
+                init[slot] = true;
+            }
             Ok(Rc::new(Expr::AssignLocal {
                 depth: 0,
-                slot,
+                slot: slot as u32,
                 expr: val_expr,
             }))
         } else {
@@ -407,26 +412,30 @@ impl Compiler {
         let slot_count = names.len();
         scopes.push(CompileScope {
             names,
-            sync_visible_limit: Some(0),
+            sync_initialized: Some(vec![false; slot_count]),
             is_lambda: false,
             pushes_runtime_frame: true,
         });
 
         let mut seq_compiled: Vec<Rc<Expr>> = Vec::with_capacity(bindings.len() + body_vals.len());
         for (idx, (_, init_val)) in bindings.iter().enumerate() {
-            if let Some(top) = scopes.last_mut() {
-                top.sync_visible_limit = Some(slot_indices[idx]);
-            }
             let init_expr = self.compile_in(init_val, scopes)?;
+            let slot = slot_indices[idx];
+            if let Some(init) = scopes
+                .last_mut()
+                .and_then(|top| top.sync_initialized.as_mut())
+            {
+                init[slot] = true;
+            }
             seq_compiled.push(Rc::new(Expr::AssignLocal {
                 depth: 0,
-                slot: slot_indices[idx] as u32,
+                slot: slot as u32,
                 expr: init_expr,
             }));
         }
 
         if let Some(top) = scopes.last_mut() {
-            top.sync_visible_limit = None;
+            top.sync_initialized = None;
         }
         for expr in &body_vals {
             seq_compiled.push(self.compile_in(expr, scopes)?);

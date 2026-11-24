@@ -44,7 +44,7 @@ impl EnvFrame {
     #[inline]
     pub fn with_void_slots(count: usize, parent: Env) -> Env {
         let slots = if count <= SMALL_SLOTS {
-            FrameSlots::Inline([Value::Void, Value::Void, Value::Void, Value::Void])
+            FrameSlots::Inline([const { Value::Void }; SMALL_SLOTS])
         } else {
             FrameSlots::Heap(vec![Value::Void; count])
         };

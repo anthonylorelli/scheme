@@ -449,8 +449,7 @@ fn proc_native_eval(i: &mut Interpreter, args: &[Value], _env: &Env) -> Result<V
             compiler.compile(other).map_err(Signal::Error)?
         }
     };
-    let global = i.global_env().clone();
-    i.execute(expr, global)
+    i.execute(expr, crate::env::EnvFrame::empty_top_level())
 }
 
 fn proc_gensym(i: &mut Interpreter, args: &[Value], _env: &Env) -> Result<Value, Signal> {

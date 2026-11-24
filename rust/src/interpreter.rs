@@ -77,7 +77,6 @@ enum OutputSink {
 
 pub struct Interpreter {
     symbols: Rc<RefCell<SymbolTable>>,
-    global_env: Env,
     output: OutputSink,
     current_dir_stack: Vec<PathBuf>,
 }
@@ -87,11 +86,9 @@ impl Interpreter {
     /// `psyntax.pp`, or `init.scm` loaded yet).
     pub fn new_bare() -> Self {
         let symbols = Rc::new(RefCell::new(SymbolTable::new()));
-        let global_env = EnvFrame::empty_top_level();
         register_standard_library(&mut symbols.borrow_mut());
         Self {
             symbols,
-            global_env,
             output: OutputSink::Stdout,
             current_dir_stack: Vec::new(),
         }
@@ -145,10 +142,6 @@ impl Interpreter {
 
     pub fn symbols(&self) -> &Rc<RefCell<SymbolTable>> {
         &self.symbols
-    }
-
-    pub fn global_env(&self) -> &Env {
-        &self.global_env
     }
 
     /// Loads `Primitives`, `psyntax.pp`, and `init.scm`.
@@ -211,16 +204,15 @@ impl Interpreter {
     }
 
     pub fn load_file(&mut self, path: impl AsRef<Path>) -> Result<Value, String> {
-        let env = self.global_env.clone();
         let path_str = path.as_ref().to_string_lossy().into_owned();
-        self.load_file_in_env(&path_str, env)
-    }
-
-    pub fn load_file_in_env(&mut self, raw_path: &str, env: Env) -> Result<Value, String> {
-        let resolved = self.resolve_load_path(raw_path);
+        let resolved = self.resolve_load_path(&path_str);
         let file = File::open(&resolved)
             .map_err(|e| format!("Could not open file '{}': {e}", resolved.display()))?;
-        if let Some(parent) = resolved.canonicalize().ok().and_then(|c| c.parent().map(Path::to_path_buf)) {
+        if let Some(parent) = resolved
+            .canonicalize()
+            .ok()
+            .and_then(|c| c.parent().map(Path::to_path_buf))
+        {
             self.current_dir_stack.push(parent);
         } else if let Some(parent) = resolved.parent() {
             self.current_dir_stack.push(parent.to_path_buf());
@@ -229,21 +221,20 @@ impl Interpreter {
         }
 
         let reader = BufReader::new(file);
-        let res = self.eval_reader_in_env(reader, env);
+        let res = self.eval_reader(reader);
         self.current_dir_stack.pop();
         res
     }
 
     pub fn eval_str(&mut self, source: &str) -> Result<Value, String> {
-        let env = self.global_env.clone();
-        self.eval_reader_in_env(Cursor::new(source.as_bytes()), env)
+        self.eval_reader(Cursor::new(source.as_bytes()))
     }
 
-    pub fn eval_reader_in_env<R: BufRead>(&mut self, reader: R, env: Env) -> Result<Value, String> {
+    pub fn eval_reader<R: BufRead>(&mut self, reader: R) -> Result<Value, String> {
         let mut parser = Parser::new(Scanner::new(reader), self.symbols.clone());
         let mut last = Value::Void;
         while let Some(datum) = parser.read()? {
-            last = self.eval_datum_in_env(datum, env.clone())?;
+            last = self.eval_datum(datum)?;
         }
         Ok(last)
     }
@@ -252,17 +243,16 @@ impl Interpreter {
         let Some(datum) = parser.read()? else {
             return Ok(None);
         };
-        let env = self.global_env.clone();
-        let val = self.eval_datum_in_env(datum, env)?;
+        let val = self.eval_datum(datum)?;
         Ok(Some(val))
     }
 
-    pub fn eval_datum_in_env(&mut self, datum: Value, env: Env) -> Result<Value, String> {
+    pub fn eval_datum(&mut self, datum: Value) -> Result<Value, String> {
         let expanded = MacroExpander::expand(self, datum)?;
         let cache = self.symbols.borrow().cache.clone();
         let compiler = Compiler::new(cache);
         let compiled = compiler.compile(&expanded)?;
-        self.evaluate_compiled(compiled, env)
+        self.evaluate_compiled(compiled, EnvFrame::empty_top_level())
     }
 
     pub fn call_procedure_top_level(
@@ -270,7 +260,7 @@ impl Interpreter {
         proc: &Procedure,
         args: Vec<Value>,
     ) -> Result<Value, String> {
-        let env = self.global_env.clone();
+        let env = EnvFrame::empty_top_level();
         let mut pending_res = self.apply_procedure(proc, args, &env);
         self.drive_trampoline(&mut pending_res)
     }
@@ -311,8 +301,8 @@ impl Interpreter {
         k: Continuation,
     ) -> Result<Value, Signal> {
         let k_val = Value::Procedure(Procedure::Continuation(k));
-        let global = self.global_env.clone();
-        let val = match self.apply_procedure(proc, vec![k_val], &global) {
+        let top_env = EnvFrame::empty_top_level();
+        let val = match self.apply_procedure(proc, vec![k_val], &top_env) {
             Ok(v) => v,
             Err(Signal::Capture {
                 proc: inner_proc,
@@ -697,7 +687,7 @@ impl Interpreter {
                     let args_rib = match args {
                         ApplyArgs::Normal(rand_exprs) if rand_exprs.len() <= SMALL_SLOTS => {
                             let n = rand_exprs.len();
-                            let mut buf = [Value::Void, Value::Void, Value::Void, Value::Void];
+                            let mut buf = [const { Value::Void }; SMALL_SLOTS];
                             for idx in (0..n).rev() {
                                 match self.execute(rand_exprs[idx].clone(), env.clone()) {
                                     Ok(v) => buf[idx] = v,
@@ -797,6 +787,11 @@ impl Interpreter {
                                 SmallArgs::Inline { len: 1, mut buf } => {
                                     std::mem::replace(&mut buf[0], Value::Void)
                                 }
+                                SmallArgs::Heap(mut v) => match v.len() {
+                                    0 => Value::Void,
+                                    1 => v.pop().unwrap(),
+                                    _ => Value::Values(Box::new(v)),
+                                },
                                 other => Value::Values(Box::new(other.into_vec())),
                             };
                             return Err(Signal::Invoke {

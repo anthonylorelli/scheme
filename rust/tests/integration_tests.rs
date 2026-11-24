@@ -372,4 +372,36 @@ fn small_arity_and_spill_edge_cases() {
         )
         .unwrap();
     assert_eq!(multi_val_k.to_string(), "15");
+
+    // call-with-values invoking a continuation directly with 1 value and 0 values
+    assert_eq!(
+        interp
+            .eval_str("(+ 1 (call/cc (lambda (k) (call-with-values (lambda () 42) k))))")
+            .unwrap()
+            .to_string(),
+        "43"
+    );
+    assert_eq!(
+        interp
+            .eval_str("(eq? (void) (call/cc (lambda (k) (call-with-values (lambda () (values)) k))))")
+            .unwrap()
+            .to_string(),
+        "#t"
+    );
+
+    // Internal define inside a letrec initializer and duplicate letrec binding names
+    assert_eq!(
+        interp
+            .eval_str("(_native-eval '(letrec ((a (begin (define b 10) (+ b 1)))) (+ a b)))")
+            .unwrap()
+            .to_string(),
+        "21"
+    );
+    assert_eq!(
+        interp
+            .eval_str("(_native-eval '(letrec ((a 1) (b 2) (a (+ a b))) a))")
+            .unwrap()
+            .to_string(),
+        "3"
+    );
 }
