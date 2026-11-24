@@ -1,13 +1,18 @@
 use std::rc::Rc;
 
+use crate::continuation::PromptTag;
 use crate::env::Env;
 use crate::instruction::Expr;
 use crate::symbol::Symbol;
-use crate::value::Value;
+use crate::value::{Procedure, Value};
 
 #[derive(Clone, Debug)]
 pub enum Context {
     Halt,
+    Prompt {
+        tag: PromptTag,
+        handler: Option<Procedure>,
+    },
     Cond {
         consequent: Rc<Expr>,
         alternate: Rc<Expr>,

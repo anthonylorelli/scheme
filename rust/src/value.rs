@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::fmt;
 use std::rc::Rc;
 
-use crate::continuation::Continuation;
+use crate::continuation::{Continuation, PromptTag};
 use crate::env::Env;
 use crate::instruction::{Arity, Expr};
 use crate::interpreter::{Interpreter, Signal};
@@ -37,6 +37,7 @@ pub enum Procedure {
     Native(Rc<NativeProcedure>),
     Closure(Rc<Closure>),
     Continuation(Continuation),
+    ComposableContinuation(Continuation),
 }
 
 impl Procedure {
@@ -45,6 +46,7 @@ impl Procedure {
             (Self::Native(a), Self::Native(b)) => Rc::ptr_eq(a, b),
             (Self::Closure(a), Self::Closure(b)) => Rc::ptr_eq(a, b),
             (Self::Continuation(a), Self::Continuation(b)) => a.ptr_eq(b),
+            (Self::ComposableContinuation(a), Self::ComposableContinuation(b)) => a.ptr_eq(b),
             _ => false,
         }
     }
@@ -62,6 +64,7 @@ impl fmt::Display for Procedure {
             Self::Native(n) => write!(f, "<#primitive:{}>", n.name),
             Self::Closure(c) => write!(f, "<#function> Args: {}", c.args_display),
             Self::Continuation(_) => write!(f, "<#continuation>"),
+            Self::ComposableContinuation(_) => write!(f, "<#composable-continuation>"),
         }
     }
 }
@@ -78,6 +81,7 @@ pub enum Value {
     Pair(Rc<RefCell<Pair>>),
     Vector(Rc<RefCell<Vec<Value>>>),
     Procedure(Procedure),
+    PromptTag(PromptTag),
     Values(Box<Vec<Value>>),
     Compiled(Rc<Expr>),
     /// Internal carrier for evaluated argument ribs during continuation resumption.
@@ -157,6 +161,7 @@ impl Value {
             (Self::Pair(a), Self::Pair(b)) => Rc::ptr_eq(a, b),
             (Self::Vector(a), Self::Vector(b)) => Rc::ptr_eq(a, b),
             (Self::Procedure(a), Self::Procedure(b)) => a.ptr_eq(b),
+            (Self::PromptTag(a), Self::PromptTag(b)) => a == b,
             (Self::Compiled(a), Self::Compiled(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
@@ -243,6 +248,7 @@ impl fmt::Display for Value {
                 f.write_str(")")
             }
             Self::Procedure(proc) => write!(f, "{proc}"),
+            Self::PromptTag(tag) => write!(f, "{tag}"),
             Self::Values(vals) => {
                 for (idx, v) in vals.iter().enumerate() {
                     if idx > 0 {
