@@ -6,17 +6,19 @@ This document summarizes the empirical performance comparison between the origin
 
 ## 1. Executive Summary
 
-- **Pure Recursion & Tail Loops (No Continuations)**: Once warmed up, the two implementations run at **nearly identical speeds**, with **.NET 10's JIT ~9–10% faster** (`0.91x–0.92x`) than Rust on allocation-heavy recursive loops (`tak`, `tail-loop-100k`) thanks to generational bump-pointer nursery (`Gen0`) allocation vs. per-frame reference-counted heap allocation (`Rc<RefCell<EnvFrame>>`).
-- **First-Class Continuations (`call/cc`)**: On continuation-intensive workloads, **Rust is 4.9x to 23.0x faster** than C#:
-  - **14.4x faster** at continuation capture (`0.85 µs` vs. `12.24 µs` per capture)
-  - **17.8x faster** at continuation invocation (`0.38 µs` vs. `6.82 µs` per jump)
-  - **14.9x faster** on symmetric producer/consumer coroutines
-  - **23.0x faster** on `ctak` (`186.1 ms` vs. `4,271.4 ms`)
-- **Continuation Overhead Ratio (`ctak / tak`)**: Turning pure Takeuchi recursion (`tak`) into continuation-passing `ctak` adds **114.8x** overhead in C# due to CLR exception unwinding, compared to only **4.58x** overhead in Rust using algebraic `Result<Value, Signal>` return values.
+Following the addition of **compile-time lexical addressing (`(depth, slot)`)**, **direct global value slots**, **stack-allocated small-arity evaluation**, and a **compact 16-byte `Value` enum** in the Rust interpreter, **Rust is now faster than C# (.NET 10) across every single workload**:
+
+- **Pure Recursion & Tail Loops (No Continuations)**: **Rust is 1.74x–2.01x faster** than warmed-up .NET 10 JIT (`tail-loop-100k`: `24.8 ms` vs. `43.1 ms`; `tak-18-12-6`: `18.5 ms` vs. `37.2 ms`), reversing the earlier ~9–10% deficit caused by per-call `HashMap` environment frames.
+- **First-Class Continuations (`call/cc`)**: On continuation-intensive workloads, **Rust is 10.0x to 32.2x faster** than C#:
+  - **26.8x faster** at continuation capture (`0.46 µs` vs. `12.24 µs` per capture)
+  - **32.2x faster** at continuation invocation (`0.21 µs` vs. `6.82 µs` per jump)
+  - **29.2x faster** on symmetric producer/consumer coroutines (`47 µs` vs. `1,374 µs`)
+  - **30.2x faster** on `ctak` (`141.3 ms` vs. `4,271.4 ms`)
+- **Continuation Overhead Ratio (`ctak / tak`)**: Turning pure Takeuchi recursion (`tak`) into continuation-passing `ctak` adds **114.8x** overhead in C# due to CLR exception unwinding, compared to **7.65x** overhead in Rust (`15.0x` lower relative penalty) using algebraic `Result<Value, Signal>` return values.
 - **Startup, Macro Expansion, and Memory**:
-  - **1.48x faster** cold startup + `psyntax.pp` bootstrap (`158.2 ms` vs. `234.9 ms`)
-  - **3.07x faster** end-to-end execution of the 32-check [`test/continuations.scm`](../test/continuations.scm) suite (`340.0 ms` vs. `1,043.2 ms`)
-  - **2.94x lower** peak resident memory (`35.3 MB` vs. `103.7 MB` RSS)
+  - **2.38x faster** cold startup + `psyntax.pp` bootstrap (`98.8 ms` vs. `234.9 ms`)
+  - **5.52x faster** end-to-end execution of the 32-check [`test/continuations.scm`](../test/continuations.scm) suite (`188.8 ms` vs. `1,043.2 ms`)
+  - **4.61x lower** peak resident memory (`22.5 MB` vs. `103.7 MB` RSS)
 
 ---
 
@@ -35,6 +37,7 @@ This document summarizes the empirical performance comparison between the origin
 2. **JIT & Cache Warmup**: Every in-process microbenchmark executes untimed warmup iterations inside the same process prior to timed iterations so .NET 10's Tiered Compilation promotes hot methods (`Interpreter.Execute`, `Closure.BindArguments`, `Environment.Lookup`, etc.) to optimized Tier-1 native code before timing begins.
 3. **High-Resolution In-Process Timing**: Microbenchmarks use `(time thunk)` from [`lib/init.scm`](../lib/init.scm) backed by `_get-ticks` (`100 ns` tick resolution in both `DateTime.UtcNow.Ticks` and `SystemTime::now()`), excluding stdout `display` I/O from timed regions.
 4. **Memory**: Peak Resident Set Size (RSS) is measured over the full benchmark run via `/usr/bin/time -v`.
+5. **Cross-Run Baseline Note**: C# (`.NET 10 Release`) numbers are carried over from the prior benchmark run on the identical hardware and OS specification (`Intel Xeon Platinum 8481C`, Debian 12, Linux `6.12.105+`), while all Rust before/after figures in Sections 3–5 were freshly measured on the same machine.
 
 ---
 
@@ -42,10 +45,10 @@ This document summarizes the empirical performance comparison between the origin
 
 | Metric | Rust (`--release`) | C# (`.NET 10 Release`) | Ratio (`C# / Rust`) |
 | :--- | ---: | ---: | ---: |
-| **Cold Startup + `psyntax.pp` Bootstrap** (`(+ 1 2)`, median of 7 runs) | **158.22 ms** *(min 143.52 ms)* | 234.91 ms *(min 225.13 ms)* | **Rust 1.48x faster** |
-| **Full [`test/continuations.scm`](../test/continuations.scm) Suite** (32 checks + `psyntax` expansion, median of 5 runs) | **339.96 ms** *(min 339.43 ms)* | 1,043.16 ms *(min 947.82 ms)* | **Rust 3.07x faster** |
-| **Full 9-Workload Benchmark Suite Wall Time** | **3.137 s** | 29.357 s | **Rust 9.36x faster** |
-| **Peak Resident Set Size (RSS)** | **35.3 MB** (`36,152 KB`) | 103.7 MB (`106,188 KB`) | **Rust 2.94x less RAM** |
+| **Cold Startup + `psyntax.pp` Bootstrap** (`(+ 1 2)`, median of 7 runs) | **98.82 ms** *(min 97.18 ms)* | 234.91 ms *(min 225.13 ms)* | **Rust 2.38x faster** |
+| **Full [`test/continuations.scm`](../test/continuations.scm) Suite** (32 checks + `psyntax` expansion, median of 5 runs) | **188.83 ms** *(min 187.84 ms)* | 1,043.16 ms *(min 947.82 ms)* | **Rust 5.52x faster** |
+| **Full 9-Workload Benchmark Suite Wall Time** | **2.17 s** | 29.357 s | **Rust 13.53x faster** |
+| **Peak Resident Set Size (RSS)** | **22.5 MB** (`23,048 KB`) | 103.7 MB (`106,188 KB`) | **Rust 4.61x less RAM** |
 
 ---
 
@@ -55,40 +58,66 @@ All times below are **microseconds (µs) per iteration** after warmup:
 
 | Workload | Description | Iters | Rust Avg (µs) | C# Avg (µs) | Rust Min (µs) | C# Min (µs) | Speedup (Avg) | Speedup (Min) |
 | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **`tail-loop-100k`** | 100,000 tail-recursive iterations (`tail-sum`) | 20 | 47,449 | **43,078** | 46,827 | **42,471** | 0.91x *(C# 1.10x)* | 0.91x *(C# 1.10x)* |
-| **`tak-18-12-6`** | `(tak 18 12 6)` — 63,609 calls, **no** `call/cc` | 10 | 40,610 | **37,220** | 40,342 | **35,635** | 0.92x *(C# 1.09x)* | 0.88x *(C# 1.13x)* |
-| **`exception-x100`** | 100 non-local `try`/`throw` escapes via `call/cc` | 30 | **570** | 2,818 | **552** | 2,214 | **4.94x** | **4.01x** |
-| **`amb-6-queens`** | McCarthy's `amb` backtracking (all 6-Queens solutions) | 10 | **6,278** | 36,822 | **5,995** | 35,939 | **5.87x** | **5.99x** |
-| **`yin-yang-200`** | 200 steps of Yin-Yang nested continuation ping-pong | 30 | **263** | 1,756 | **248** | 1,671 | **6.68x** | **6.74x** |
-| **`capture-k-1000`** | `(capture-k 1000)` — 1,000 sequential `call/cc` captures | 50 | **848** | 12,235 | **813** | 10,970 | **14.43x** | **13.49x** |
-| **`fibo-coroutines`** | `(get-fibo-list 2000)` — symmetric coroutines | 100 | **92** | 1,374 | **86** | 1,298 | **14.93x** | **15.09x** |
-| **`invoke-k-1000`** | `(invoke-k 1000)` — 1,000 continuation re-invocations | 50 | **383** | 6,817 | **358** | 6,586 | **17.80x** | **18.40x** |
-| **`ctak-18-12-6`** | `(ctak 18 12 6)` — 63,609 calls with `call/cc` per call | 5 | **186,101** | 4,271,447 | **184,717** | 4,252,443 | **22.95x** | **23.02x** |
+| **`tail-loop-100k`** | 100,000 tail-recursive iterations (`tail-sum`) | 20 | **24,805** | 43,078 | **24,229** | 42,471 | **1.74x** | **1.75x** |
+| **`tak-18-12-6`** | `(tak 18 12 6)` — 63,609 calls, **no** `call/cc` | 10 | **18,475** | 37,220 | **17,956** | 35,635 | **2.01x** | **1.98x** |
+| **`exception-x100`** | 100 non-local `try`/`throw` escapes via `call/cc` | 30 | **281** | 2,818 | **268** | 2,214 | **10.03x** | **8.26x** |
+| **`amb-6-queens`** | McCarthy's `amb` backtracking (all 6-Queens solutions) | 10 | **2,969** | 36,822 | **2,746** | 35,939 | **12.40x** | **13.09x** |
+| **`yin-yang-200`** | 200 steps of Yin-Yang nested continuation ping-pong | 30 | **107** | 1,756 | **98** | 1,671 | **16.41x** | **17.05x** |
+| **`capture-k-1000`** | `(capture-k 1000)` — 1,000 sequential `call/cc` captures | 50 | **456** | 12,235 | **414** | 10,970 | **26.83x** | **26.50x** |
+| **`fibo-coroutines`** | `(get-fibo-list 2000)` — symmetric coroutines | 100 | **47** | 1,374 | **44** | 1,298 | **29.23x** | **29.50x** |
+| **`invoke-k-1000`** | `(invoke-k 1000)` — 1,000 continuation re-invocations | 50 | **212** | 6,817 | **200** | 6,586 | **32.16x** | **32.93x** |
+| **`ctak-18-12-6`** | `(ctak 18 12 6)` — 63,609 calls with `call/cc` per call | 5 | **141,265** | 4,271,447 | **139,586** | 4,252,443 | **30.24x** | **30.46x** |
 
 ### Derived Per-Operation Costs
 
 | Primitive Operation | Rust | C# (.NET 10) | Rust Advantage |
 | :--- | ---: | ---: | ---: |
-| **Single tail-recursive closure call** (`tail-loop-100k / 100,000`) | `0.47 µs` | **`0.43 µs`** | 0.91x *(C# 1.10x)* |
-| **Single non-tail recursive call** (`tak / 63,609`) | `0.64 µs` | **`0.59 µs`** | 0.92x *(C# 1.09x)* |
-| **Single `call/cc` capture** (`capture-k-1000 / 1,000`) | **`0.85 µs`** | `12.24 µs` | **14.4x faster** |
-| **Single continuation jump** (`invoke-k-1000 / 1,000`) | **`0.38 µs`** | `6.82 µs` | **17.8x faster** |
-| **Continuation overhead ratio** (`ctak / tak` on `(18 12 6)`) | **`4.58x`** | `114.76x` | **25.1x lower relative penalty** |
+| **Single tail-recursive closure call** (`tail-loop-100k / 100,000`) | **`0.25 µs`** | `0.43 µs` | **1.74x faster** |
+| **Single non-tail recursive call** (`tak / 63,609`) | **`0.29 µs`** | `0.59 µs` | **2.01x faster** |
+| **Single `call/cc` capture** (`capture-k-1000 / 1,000`) | **`0.46 µs`** | `12.24 µs` | **26.8x faster** |
+| **Single continuation jump** (`invoke-k-1000 / 1,000`) | **`0.21 µs`** | `6.82 µs` | **32.2x faster** |
+| **Continuation overhead ratio** (`ctak / tak` on `(18 12 6)`) | **`7.65x`** | `114.76x` | **15.0x lower relative penalty** |
 
 ---
 
-## 5. Architectural Analysis
+## 5. Rust Optimization Progression (Before vs. After)
 
-### 5.1 Why Pure Recursion (`tak`, `tail-loop`) Is ~9% Faster in C#
-When no continuations are captured or invoked, both interpreters spend nearly all execution time allocating lexical environments, evaluating compiled AST nodes, and looking up variables:
+Measuring the Rust interpreter across each optimization stage on the same machine highlights how much overhead came from dynamic environment hashing and `Value` size:
 
-1. **Generational Bump Allocation vs. General-Purpose Heap + `Rc` Traffic**:
-   - Both interpreters heap-allocate lexical environment frames so that upward continuations and closures can safely outlive the call that created them (`new Environment(...)` in [`csharp/src/Environment.cs`](../csharp/src/Environment.cs) vs. `Rc<RefCell<EnvFrame>>` in [`rust/src/env.rs`](../rust/src/env.rs)).
-   - In pure recursion (`tak` creates 63,609 short-lived frames; `tail-loop-100k` creates 100,000 short-lived frames), almost 100% of frames die immediately. .NET 10's generational GC allocates `Gen0` objects via a thread-local bump pointer in a few CPU cycles and reclaims dead `Gen0` objects without visiting them, whereas Rust allocates and frees every `EnvFrame` + `Vec` individually through the system allocator (`malloc`/`free`) and increments/decrements `Rc` reference counts on `Expr`, `Env`, and `Symbol` handles.
-2. **Memory/Throughput Trade-off**:
-   - C#'s bump-allocation throughput comes at the cost of **2.94x higher peak memory** (`103.7 MB` vs. `35.3 MB`), whereas Rust reclaims dead frames deterministically at scope exit with zero GC pause overhead.
+| Workload | Baseline Rust (`HashMap` Env) | + Lexical Addressing & Global Slots | + Small-Arity (32B `Value`) | + Small-Arity (16B `Value`) | Total Rust Speedup |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| **`tail-loop-100k`** (avg µs) | 46,431 | 29,807 | 29,191 | **24,805** | **1.87x** (-46.6%) |
+| **`tak-18-12-6`** (avg µs) | 38,157 | 20,928 | 21,547 | **18,475** | **2.07x** (-51.6%) |
+| **`exception-x100`** (avg µs) | 541 | 315 | 342 | **281** | **1.93x** (-48.1%) |
+| **`amb-6-queens`** (avg µs) | 6,724 | 3,245 | 3,352 | **2,969** | **2.26x** (-55.8%) |
+| **`yin-yang-200`** (avg µs) | 225 | 123 | 128 | **107** | **2.10x** (-52.4%) |
+| **`capture-k-1000`** (avg µs) | 825 | 477 | 515 | **456** | **1.81x** (-44.7%) |
+| **`fibo-coroutines`** (avg µs) | 80 | 47 | 49 | **47** | **1.70x** (-41.3%) |
+| **`invoke-k-1000`** (avg µs) | 367 | 247 | 230 | **212** | **1.73x** (-42.2%) |
+| **`ctak-18-12-6`** (avg µs) | 177,666 | 140,349 | 145,063 | **141,265** | **1.26x** (-20.5%) |
+| **Cold startup + `psyntax.pp`** (ms) | 109.35 | 102.67 | — | **98.82** | **1.11x** (-9.6%) |
+| **`test/continuations.scm`** (ms) | 306.43 | 208.07 | — | **188.83** | **1.62x** (-38.4%) |
+| **Peak RSS** | 35.2 MB | 26.9 MB | 29.7 MB | **22.5 MB** | **-36.0% RAM** |
 
-### 5.2 Why Continuations (`call/cc`) Are 14x–23x Faster in Rust
+---
+
+## 6. Architectural Analysis
+
+### 6.1 Why Rust Now Leads on Pure Recursion & Tail Loops (`1.74x–2.01x`)
+In the initial 1:1 port, both interpreters allocated a hash-table lexical frame per call (`new Environment(...)` in [`csharp/src/Environment.cs`](../csharp/src/Environment.cs) vs. `Rc<RefCell<HashMap<Symbol, Value>>>` in Rust), giving .NET 10's generational bump-pointer nursery (`Gen0`) a ~9% edge on allocation-heavy recursion. Three Rust-side optimizations eliminated that bottleneck:
+
+1. **Compile-Time Lexical Addressing (`(depth, slot)`) & Direct Global Cells**:
+   - [`Compiler`](../rust/src/compiler.rs) resolves every variable reference and `set!` statically into either `Expr::LocalVar { depth, slot }` / `Expr::AssignLocal` or `Expr::GlobalVar(Symbol)` / `Expr::AssignGlobal`, compiles `letrec` directly into `Expr::PushFrame`, and elides runtime frames entirely for frameless 0-argument thunks.
+   - [`EnvFrame`](../rust/src/env.rs) stores flat indexed slots with an immutable `parent: Option<Rc<EnvFrame>>`, so walking `depth` frames requires zero `RefCell::borrow` or `Rc::clone` calls, and top-level `Env` is `None` (zero refcount traffic).
+   - [`Symbol`](../rust/src/symbol.rs) carries a direct `global_val: RefCell<Option<Value>>` cell, making global variable lookups (`+`, `-`, `<`, `tak`, `tail-sum`, etc.) O(1) pointer dereferences with zero hashing.
+2. **Stack-Allocated Small-Arity Calls & Inline 4-Slot Frames**:
+   - Calls with `0..=4` arguments evaluate directly into a stack-allocated [`SmallArgs`](../rust/src/interpreter.rs) array (`[Value; 4]`) instead of allocating a temporary `Vec<Value>`, eliminating heap allocations on native primitive calls (`+`, `-`, `=`, `<`, `car`, `cdr`, `cons`, `call/cc`) and single-value continuation jumps.
+   - [`EnvFrame`](../rust/src/env.rs) stores up to 4 slots inline (`FrameSlots::Inline([Value; 4])`), collapsing small closure and `letrec` frames from two heap allocations (`Rc` + `Vec`) into one.
+3. **Compact 16-Byte `Value` Layout**:
+   - Boxing the two rare `Vec`-carrying variants (`Value::Values(Box<Vec<Value>>)` and `Value::Rib(Box<Vec<Value>>)`) in [`rust/src/value.rs`](../rust/src/value.rs) halved `std::mem::size_of::<Value>()` from **32 bytes to 16 bytes** (enforced at compile time).
+   - Without that shrink, inline `[Value; 4]` arrays were 128 bytes and actually regressed `tak`, `amb-6-queens`, and RSS (`29.7 MB`); at 16 bytes per `Value`, `[Value; 4]` fits in a single 64-byte cache line, unlocking the full speedup and dropping peak RSS to **22.5 MB** (`4.61x` less than C#).
+
+### 6.2 Why Continuations (`call/cc`) Are 10x–32x Faster in Rust
 Both interpreters implement **stack reconstruction** rather than CPS conversion or full stack copying, preserving direct host-stack evaluation during normal execution. However, the *mechanism* used to unwind and reconstruct frames differs fundamentally between a managed VM and Rust:
 
 1. **CLR Exception Unwinding vs. Zero-Cost Algebraic `Result` Unwinding**:
@@ -99,19 +128,19 @@ Both interpreters implement **stack reconstruction** rather than CPS conversion 
      - On the CLR, throwing and rethrowing exceptions invokes heavy runtime machinery: two-pass stack walking, exception-handling (EH) metadata table lookups per frame, and exception stack-trace capture (~`12.2 µs` per capture, ~`6.8 µs` per invoke).
    - **Rust ([`rust/src/interpreter.rs`](../rust/src/interpreter.rs), [`rust/src/context.rs`](../rust/src/context.rs))**:
      - Evaluation returns `Result<Value, Signal>`, where `Signal` is a plain Rust `enum` (`Signal::Capture { proc, frames }`, `Signal::Invoke { k_frames, val }`, `Signal::Error(String)`).
-     - Unwinding an active frame is an ordinary integer discriminant check in registers (`Err(Signal::Capture { proc, mut frames }) => { frames.push(...); return Err(...); }`) with **zero** DWARF/SEH unwinding, **zero** stack-walking metadata lookups, and **zero** per-frame heap node allocations (~`0.85 µs` per capture, ~`0.38 µs` per invoke).
+     - Unwinding an active frame is an ordinary integer discriminant check in registers (`Err(Signal::Capture { proc, mut frames }) => { frames.push(...); return Err(...); }`) with **zero** DWARF/SEH unwinding, **zero** stack-walking metadata lookups, and **zero** per-frame heap node allocations (~`0.46 µs` per capture, ~`0.21 µs` per invoke).
 
-2. **Contiguous Frame Slices (`Rc<[Context]>`) vs. Doubly-Linked `ContextList` Deep Copies**:
+2. **Contiguous Frame Slices (`Rc<Vec<Context>>`) vs. Doubly-Linked `ContextList` Deep Copies**:
    - In **C#** ([`csharp/src/Context.cs`](../csharp/src/Context.cs)), a captured continuation is a doubly-linked `ContextList` of heap-allocated `Context` objects. When capturing a new continuation inside a resumed continuation (which occurs constantly in coroutines, `amb`, `yin-yang`, and `ctak`), `CaptureException.AppendContext` calls `ContextList.CopyStack()`, allocating a fresh linked list node per frame.
-   - In **Rust** ([`rust/src/context.rs`](../rust/src/context.rs)), `Continuation` stores captured frames in a single contiguous `Rc<[Context]>` slice. Invoking a continuation clones only the `Rc` fat pointer (`O(1)`), and re-capturing inside a resumed continuation appends older frames via a single contiguous `Vec::extend_from_slice` copy.
+   - In **Rust** ([`rust/src/continuation.rs`](../rust/src/continuation.rs)), `Continuation` stores captured frames in a single contiguous `Rc<Vec<Context>>`. Invoking a continuation clones only the `Rc` pointer (`O(1)`), and re-capturing inside a resumed continuation appends older frames via a single contiguous `Vec::extend_from_slice` copy.
 
 3. **Compiled Typed AST (`enum Expr`) vs. S-Expression Instruction Lists**:
    - In **C#** ([`csharp/src/Compiler.cs`](../csharp/src/Compiler.cs)), compiled bytecode instructions are represented as linked `Pair` lists (`List.First(expr) == Instruction.Apply`, `List.Second(expr)`, `List.Third(expr)`), requiring pointer chasing on every AST dispatch and during macro expansion (`psyntax.pp`).
-   - In **Rust** ([`rust/src/compiler.rs`](../rust/src/compiler.rs)), compiled expressions are compact typed `Expr` enums (`Expr::Constant`, `Expr::Var`, `Expr::Cond`, `Expr::Apply`, etc.), improving cache locality and contributing to the **3.07x faster** execution on macro-heavy suites like [`test/continuations.scm`](../test/continuations.scm).
+   - In **Rust** ([`rust/src/compiler.rs`](../rust/src/compiler.rs)), compiled expressions are compact typed `Expr` enums (`Expr::Constant`, `Expr::LocalVar`, `Expr::GlobalVar`, `Expr::Conditional`, `Expr::Apply`, etc.), improving cache locality and contributing to the **5.52x faster** execution on macro-heavy suites like [`test/continuations.scm`](../test/continuations.scm).
 
 ---
 
-## 6. Reproducing the Benchmarks
+## 7. Reproducing the Benchmarks
 
 You can run the built-in continuation benchmark suite ([`test/callcc.scm`](../test/callcc.scm)) on both implementations using `Makefile` targets from the repository root:
 

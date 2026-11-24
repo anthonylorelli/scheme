@@ -3,12 +3,12 @@ use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::compiler::Compiler;
-use crate::env::{Env, EnvFrame};
+use crate::env::Env;
 use crate::interpreter::{Interpreter, Signal};
 use crate::symbol::{Symbol, SymbolTable};
 use crate::value::{NativeFn, NativeProcedure, Procedure, Value};
 
-pub fn register_standard_library(symbols: &mut SymbolTable, env: &Env) {
+pub fn register_standard_library(symbols: &mut SymbolTable) {
     let primitives: &[(&str, NativeFn)] = &[
         ("cons", proc_cons),
         ("car", proc_car),
@@ -66,7 +66,7 @@ pub fn register_standard_library(symbols: &mut SymbolTable, env: &Env) {
     for &(name, func) in primitives {
         let sym = symbols.intern(name);
         let proc = Value::Procedure(Procedure::Native(Rc::new(NativeProcedure { name, func })));
-        EnvFrame::define(env, sym, proc);
+        sym.define_global(proc);
     }
 }
 
@@ -191,14 +191,13 @@ fn proc_zero_pred(_i: &mut Interpreter, args: &[Value], _env: &Env) -> Result<Va
     Ok(Value::Bool(n == 0))
 }
 
-fn proc_load(i: &mut Interpreter, args: &[Value], env: &Env) -> Result<Value, Signal> {
+fn proc_load(i: &mut Interpreter, args: &[Value], _env: &Env) -> Result<Value, Signal> {
     expect_arity(args, 1, "load")?;
     let path_str = match &args[0] {
         Value::Str(s) => s.as_str().to_string(),
         other => other.to_string(),
     };
-    i.load_file_in_env(&path_str, env.clone())
-        .map_err(Signal::Error)?;
+    i.load_file(&path_str).map_err(Signal::Error)?;
     Ok(Value::Void)
 }
 
@@ -335,7 +334,7 @@ fn proc_values(_i: &mut Interpreter, args: &[Value], _env: &Env) -> Result<Value
     match args.len() {
         0 => Ok(Value::Void),
         1 => Ok(args[0].clone()),
-        _ => Ok(Value::Values(args.to_vec())),
+        _ => Ok(Value::Values(Box::new(args.to_vec()))),
     }
 }
 
@@ -450,8 +449,7 @@ fn proc_native_eval(i: &mut Interpreter, args: &[Value], _env: &Env) -> Result<V
             compiler.compile(other).map_err(Signal::Error)?
         }
     };
-    let global = i.global_env().clone();
-    i.execute(expr, global)
+    i.execute(expr, crate::env::EnvFrame::empty_top_level())
 }
 
 fn proc_gensym(i: &mut Interpreter, args: &[Value], _env: &Env) -> Result<Value, Signal> {
