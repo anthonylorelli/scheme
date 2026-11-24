@@ -6,12 +6,14 @@ use std::rc::Rc;
 
 use crate::compiler::Compiler;
 use crate::context::Context;
-use crate::continuation::Continuation;
+use crate::continuation::{Continuation, PromptTag};
 use crate::env::{Env, EnvFrame, SMALL_SLOTS};
 use crate::instruction::{ApplyArgs, Arity, Expr};
 use crate::macro_expander::MacroExpander;
 use crate::parser::Parser;
-use crate::primitives::{EMBEDDED_INIT_SCM, EMBEDDED_PSYNTAX_PP, PRIMITIVES_SCM};
+use crate::primitives::{
+    EMBEDDED_INIT_SCM, EMBEDDED_PSYNTAX_PP, PRIMITIVES_SCM, RUST_EXTENSIONS_SCM,
+};
 use crate::scanner::Scanner;
 use crate::stdlib::register_standard_library;
 use crate::symbol::SymbolTable;
@@ -57,9 +59,16 @@ impl SmallArgs {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum CaptureTarget {
+    Undelimited,
+    Composable(PromptTag),
+}
+
 #[derive(Debug)]
 pub enum Signal {
     Capture {
+        target: CaptureTarget,
         proc: Procedure,
         frames: Vec<Context>,
     },
@@ -67,7 +76,27 @@ pub enum Signal {
         k_frames: Rc<Vec<Context>>,
         val: Value,
     },
+    Abort {
+        tag: PromptTag,
+        args: Vec<Value>,
+    },
     Error(String),
+}
+
+enum PromptEntry<'a> {
+    Thunk {
+        proc: &'a Procedure,
+        env: &'a Env,
+    },
+    ResumeValue {
+        frames: &'a [Context],
+        val: Value,
+    },
+    ResumeProcedure {
+        frames: &'a [Context],
+        proc: &'a Procedure,
+        k_val: Value,
+    },
 }
 
 enum OutputSink {
@@ -77,6 +106,7 @@ enum OutputSink {
 
 pub struct Interpreter {
     symbols: Rc<RefCell<SymbolTable>>,
+    default_prompt_tag: PromptTag,
     output: OutputSink,
     current_dir_stack: Vec<PathBuf>,
 }
@@ -89,6 +119,7 @@ impl Interpreter {
         register_standard_library(&mut symbols.borrow_mut());
         Self {
             symbols,
+            default_prompt_tag: PromptTag::new(Some("default".to_string())),
             output: OutputSink::Stdout,
             current_dir_stack: Vec::new(),
         }
@@ -144,7 +175,11 @@ impl Interpreter {
         &self.symbols
     }
 
-    /// Loads `Primitives`, `psyntax.pp`, and `init.scm`.
+    pub fn default_prompt_tag(&self) -> &PromptTag {
+        &self.default_prompt_tag
+    }
+
+    /// Loads `Primitives`, `psyntax.pp`, `init.scm`, and Rust syntax extensions.
     /// Checks `runtime_dir` (or the executable directory / `SCHEME_LIB_DIR`) on disk first,
     /// falling back to the embedded copies from `lib/`.
     pub fn load_standard_runtime(&mut self, runtime_dir: Option<&Path>) -> Result<(), String> {
@@ -185,6 +220,8 @@ impl Interpreter {
         } else {
             self.eval_str(EMBEDDED_INIT_SCM)?;
         }
+
+        self.eval_str(RUST_EXTENSIONS_SCM)?;
 
         Ok(())
     }
@@ -270,6 +307,97 @@ impl Interpreter {
         self.drive_trampoline(&mut pending_res)
     }
 
+    pub fn call_with_prompt(
+        &mut self,
+        thunk: &Procedure,
+        tag: &PromptTag,
+        handler: Option<&Procedure>,
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        self.run_with_prompt_entry(PromptEntry::Thunk { proc: thunk, env }, tag, handler)
+    }
+
+    fn run_with_prompt_entry(
+        &mut self,
+        entry: PromptEntry<'_>,
+        tag: &PromptTag,
+        handler: Option<&Procedure>,
+    ) -> Result<Value, Signal> {
+        let mut pending = match entry {
+            PromptEntry::Thunk { proc, env } => self.apply_procedure(proc, Vec::new(), env),
+            PromptEntry::ResumeValue { frames, val } => self.resume_with_value(frames, val),
+            PromptEntry::ResumeProcedure {
+                frames,
+                proc,
+                k_val,
+            } => self.resume_with_procedure(frames, proc, k_val),
+        };
+
+        loop {
+            match pending {
+                Ok(v) => return Ok(v),
+                Err(Signal::Abort {
+                    tag: abort_tag,
+                    args,
+                }) => {
+                    if &abort_tag == tag {
+                        if let Some(h) = handler {
+                            let top_env = EnvFrame::empty_top_level();
+                            return self.apply_procedure(h, args, &top_env);
+                        }
+                        if args.len() != 1 {
+                            return Err(Signal::Error(format!(
+                                "Default prompt handler expects 1 thunk argument, got {}",
+                                args.len()
+                            )));
+                        }
+                        let abort_proc = match &args[0] {
+                            Value::Procedure(p) => p.clone(),
+                            other => {
+                                return Err(Signal::Error(format!(
+                                    "Default prompt handler expects a procedure, got {other}"
+                                )))
+                            }
+                        };
+                        let top_env = EnvFrame::empty_top_level();
+                        pending = self.apply_procedure(&abort_proc, Vec::new(), &top_env);
+                    } else {
+                        return Err(Signal::Abort {
+                            tag: abort_tag,
+                            args,
+                        });
+                    }
+                }
+                Err(Signal::Capture {
+                    target: CaptureTarget::Composable(cap_tag),
+                    proc,
+                    frames,
+                }) if &cap_tag == tag => {
+                    let k = Continuation::new(frames);
+                    let k_frames = k.frames().clone();
+                    let k_val = Value::Procedure(Procedure::ComposableContinuation(k));
+                    pending = self.resume_with_procedure(&k_frames, &proc, k_val);
+                }
+                Err(Signal::Capture {
+                    target,
+                    proc,
+                    mut frames,
+                }) => {
+                    frames.push(Context::Prompt {
+                        tag: tag.clone(),
+                        handler: handler.cloned(),
+                    });
+                    return Err(Signal::Capture {
+                        target,
+                        proc,
+                        frames,
+                    });
+                }
+                Err(other) => return Err(other),
+            }
+        }
+    }
+
     fn drive_trampoline(&mut self, pending_res: &mut Result<Value, Signal>) -> Result<Value, String> {
         loop {
             let err = match pending_res {
@@ -278,16 +406,57 @@ impl Interpreter {
             };
 
             match err {
-                Signal::Capture { proc, mut frames } => {
+                Signal::Capture {
+                    target: CaptureTarget::Undelimited,
+                    proc,
+                    mut frames,
+                } => {
                     if frames.is_empty() {
                         frames.push(Context::Halt);
                     }
                     let k = Continuation::new(frames);
                     let k_frames = k.frames().clone();
-                    *pending_res = self.resume_with_procedure(&k_frames, &proc, k);
+                    let k_val = Value::Procedure(Procedure::Continuation(k));
+                    *pending_res = self.resume_with_procedure(&k_frames, &proc, k_val);
+                }
+                Signal::Capture {
+                    target: CaptureTarget::Composable(tag),
+                    proc,
+                    frames,
+                } => {
+                    if tag == self.default_prompt_tag {
+                        let k = Continuation::new(frames);
+                        let k_frames = k.frames().clone();
+                        let k_val = Value::Procedure(Procedure::ComposableContinuation(k));
+                        *pending_res = self.resume_with_procedure(&k_frames, &proc, k_val);
+                    } else {
+                        return Err(format!("No continuation prompt found for tag {tag}"));
+                    }
                 }
                 Signal::Invoke { k_frames, val } => {
                     *pending_res = self.resume_with_value(&k_frames, val);
+                }
+                Signal::Abort { tag, args } => {
+                    if tag == self.default_prompt_tag {
+                        if args.len() != 1 {
+                            return Err(format!(
+                                "Default prompt handler expects 1 thunk argument, got {}",
+                                args.len()
+                            ));
+                        }
+                        let abort_proc = match &args[0] {
+                            Value::Procedure(p) => p.clone(),
+                            other => {
+                                return Err(format!(
+                                    "Default prompt handler expects a procedure, got {other}"
+                                ))
+                            }
+                        };
+                        let top_env = EnvFrame::empty_top_level();
+                        *pending_res = self.apply_procedure(&abort_proc, Vec::new(), &top_env);
+                    } else {
+                        return Err(format!("No continuation prompt found for tag {tag}"));
+                    }
                 }
                 Signal::Error(msg) => return Err(msg),
             }
@@ -298,18 +467,55 @@ impl Interpreter {
         &mut self,
         k_frames: &[Context],
         proc: &Procedure,
-        k: Continuation,
+        k_val: Value,
     ) -> Result<Value, Signal> {
-        let k_val = Value::Procedure(Procedure::Continuation(k));
+        if let Some(prompt_idx) = k_frames
+            .iter()
+            .rposition(|c| matches!(c, Context::Prompt { .. }))
+        {
+            let Context::Prompt { tag, handler } = &k_frames[prompt_idx] else {
+                unreachable!();
+            };
+            let inside = &k_frames[..prompt_idx];
+            let outside = &k_frames[prompt_idx + 1..];
+            let prompt_val = match self.run_with_prompt_entry(
+                PromptEntry::ResumeProcedure {
+                    frames: inside,
+                    proc,
+                    k_val,
+                },
+                tag,
+                handler.as_ref(),
+            ) {
+                Ok(v) => v,
+                Err(Signal::Capture {
+                    target,
+                    proc: inner_proc,
+                    mut frames,
+                }) => {
+                    frames.extend_from_slice(outside);
+                    return Err(Signal::Capture {
+                        target,
+                        proc: inner_proc,
+                        frames,
+                    });
+                }
+                Err(other) => return Err(other),
+            };
+            return self.resume_with_value(outside, prompt_val);
+        }
+
         let top_env = EnvFrame::empty_top_level();
         let val = match self.apply_procedure(proc, vec![k_val], &top_env) {
             Ok(v) => v,
             Err(Signal::Capture {
+                target,
                 proc: inner_proc,
                 mut frames,
             }) => {
                 frames.extend_from_slice(k_frames);
                 return Err(Signal::Capture {
+                    target,
                     proc: inner_proc,
                     frames,
                 });
@@ -321,12 +527,55 @@ impl Interpreter {
     }
 
     fn resume_with_value(&mut self, k_frames: &[Context], mut val: Value) -> Result<Value, Signal> {
+        if let Some(prompt_idx) = k_frames
+            .iter()
+            .rposition(|c| matches!(c, Context::Prompt { .. }))
+        {
+            let Context::Prompt { tag, handler } = &k_frames[prompt_idx] else {
+                unreachable!();
+            };
+            let inside = &k_frames[..prompt_idx];
+            let outside = &k_frames[prompt_idx + 1..];
+            let prompt_val = match self.run_with_prompt_entry(
+                PromptEntry::ResumeValue {
+                    frames: inside,
+                    val,
+                },
+                tag,
+                handler.as_ref(),
+            ) {
+                Ok(v) => v,
+                Err(Signal::Capture {
+                    target,
+                    proc,
+                    mut frames,
+                }) => {
+                    frames.extend_from_slice(outside);
+                    return Err(Signal::Capture {
+                        target,
+                        proc,
+                        frames,
+                    });
+                }
+                Err(other) => return Err(other),
+            };
+            return self.resume_with_value(outside, prompt_val);
+        }
+
         for (idx, ctx) in k_frames.iter().enumerate() {
             match self.invoke_context(ctx, val) {
                 Ok(next_val) => val = next_val,
-                Err(Signal::Capture { proc, mut frames }) => {
+                Err(Signal::Capture {
+                    target,
+                    proc,
+                    mut frames,
+                }) => {
                     frames.extend_from_slice(&k_frames[idx + 1..]);
-                    return Err(Signal::Capture { proc, frames });
+                    return Err(Signal::Capture {
+                        target,
+                        proc,
+                        frames,
+                    });
                 }
                 Err(other) => return Err(other),
             }
@@ -342,9 +591,31 @@ impl Interpreter {
         }
     }
 
+    #[inline]
+    fn unpack_continuation_vec(mut args: Vec<Value>) -> Value {
+        match args.len() {
+            0 => Value::Void,
+            1 => args.pop().unwrap(),
+            _ => Value::Values(Box::new(args)),
+        }
+    }
+
+    #[inline]
+    fn unpack_continuation_args(args_rib: SmallArgs) -> Value {
+        match args_rib {
+            SmallArgs::Inline { len: 0, .. } => Value::Void,
+            SmallArgs::Inline { len: 1, mut buf } => std::mem::replace(&mut buf[0], Value::Void),
+            SmallArgs::Heap(v) => Self::unpack_continuation_vec(v),
+            other => Value::Values(Box::new(other.into_vec())),
+        }
+    }
+
     fn invoke_context(&mut self, ctx: &Context, val: Value) -> Result<Value, Signal> {
         match ctx {
             Context::Halt => Ok(val),
+            Context::Prompt { .. } => {
+                unreachable!("Prompt frames are handled by resume_with_value")
+            }
             Context::Cond {
                 consequent,
                 alternate,
@@ -391,12 +662,20 @@ impl Interpreter {
                 };
                 let fn_val = match self.execute(rator.clone(), env.clone()) {
                     Ok(v) => v,
-                    Err(Signal::Capture { proc, mut frames }) => {
+                    Err(Signal::Capture {
+                        target,
+                        proc,
+                        mut frames,
+                    }) => {
                         frames.push(Context::Apply {
                             args_rib,
                             env: env.clone(),
                         });
-                        return Err(Signal::Capture { proc, frames });
+                        return Err(Signal::Capture {
+                            target,
+                            proc,
+                            frames,
+                        });
                     }
                     Err(other) => return Err(other),
                 };
@@ -435,13 +714,21 @@ impl Interpreter {
         for idx in (0..exprs.len()).rev() {
             match self.execute(exprs[idx].clone(), env.clone()) {
                 Ok(v) => evaluated_rev.push(v),
-                Err(Signal::Capture { proc, mut frames }) => {
+                Err(Signal::Capture {
+                    target,
+                    proc,
+                    mut frames,
+                }) => {
                     frames.push(Context::ArgEval {
                         remaining_left: exprs[..idx].to_vec(),
                         evaluated_rev,
                         env: env.clone(),
                     });
-                    return Err(Signal::Capture { proc, frames });
+                    return Err(Signal::Capture {
+                        target,
+                        proc,
+                        frames,
+                    });
                 }
                 Err(other) => return Err(other),
             }
@@ -552,15 +839,15 @@ impl Interpreter {
                 self.execute(closure.body.clone(), cenv)
             }
             Procedure::Continuation(k) => {
-                let val = match args.len() {
-                    0 => Value::Void,
-                    1 => args.into_iter().next().unwrap(),
-                    _ => Value::Values(Box::new(args)),
-                };
+                let val = Self::unpack_continuation_vec(args);
                 Err(Signal::Invoke {
                     k_frames: k.frames().clone(),
                     val,
                 })
+            }
+            Procedure::ComposableContinuation(k) => {
+                let val = Self::unpack_continuation_vec(args);
+                self.resume_with_value(k.frames(), val)
             }
         }
     }
@@ -584,13 +871,21 @@ impl Interpreter {
                 } => {
                     let cond = match self.execute(test.clone(), env.clone()) {
                         Ok(v) => v,
-                        Err(Signal::Capture { proc, mut frames }) => {
+                        Err(Signal::Capture {
+                            target,
+                            proc,
+                            mut frames,
+                        }) => {
                             frames.push(Context::Cond {
                                 consequent: consequent.clone(),
                                 alternate: alternate.clone(),
                                 env: env.clone(),
                             });
-                            return Err(Signal::Capture { proc, frames });
+                            return Err(Signal::Capture {
+                                target,
+                                proc,
+                                frames,
+                            });
                         }
                         Err(other) => return Err(other),
                     };
@@ -627,13 +922,21 @@ impl Interpreter {
                 } => {
                     let val = match self.execute(val_expr.clone(), env.clone()) {
                         Ok(v) => v,
-                        Err(Signal::Capture { proc, mut frames }) => {
+                        Err(Signal::Capture {
+                            target,
+                            proc,
+                            mut frames,
+                        }) => {
                             frames.push(Context::AssignLocal {
                                 depth: *depth,
                                 slot: *slot,
                                 env: env.clone(),
                             });
-                            return Err(Signal::Capture { proc, frames });
+                            return Err(Signal::Capture {
+                                target,
+                                proc,
+                                frames,
+                            });
                         }
                         Err(other) => return Err(other),
                     };
@@ -643,9 +946,17 @@ impl Interpreter {
                 Expr::AssignGlobal { id, expr: val_expr } => {
                     let val = match self.execute(val_expr.clone(), env.clone()) {
                         Ok(v) => v,
-                        Err(Signal::Capture { proc, mut frames }) => {
+                        Err(Signal::Capture {
+                            target,
+                            proc,
+                            mut frames,
+                        }) => {
                             frames.push(Context::AssignGlobal { id: id.clone() });
-                            return Err(Signal::Capture { proc, frames });
+                            return Err(Signal::Capture {
+                                target,
+                                proc,
+                                frames,
+                            });
                         }
                         Err(other) => return Err(other),
                     };
@@ -660,9 +971,17 @@ impl Interpreter {
                 Expr::DefineGlobal { id, expr: val_expr } => {
                     let val = match self.execute(val_expr.clone(), env.clone()) {
                         Ok(v) => v,
-                        Err(Signal::Capture { proc, mut frames }) => {
+                        Err(Signal::Capture {
+                            target,
+                            proc,
+                            mut frames,
+                        }) => {
                             frames.push(Context::DefineGlobal { id: id.clone() });
-                            return Err(Signal::Capture { proc, frames });
+                            return Err(Signal::Capture {
+                                target,
+                                proc,
+                                frames,
+                            });
                         }
                         Err(other) => return Err(other),
                     };
@@ -672,12 +991,20 @@ impl Interpreter {
                 Expr::Sequence { first, rest } => {
                     match self.execute(first.clone(), env.clone()) {
                         Ok(_) => {}
-                        Err(Signal::Capture { proc, mut frames }) => {
+                        Err(Signal::Capture {
+                            target,
+                            proc,
+                            mut frames,
+                        }) => {
                             frames.push(Context::Seq {
                                 next: rest.clone(),
                                 env: env.clone(),
                             });
-                            return Err(Signal::Capture { proc, frames });
+                            return Err(Signal::Capture {
+                                target,
+                                proc,
+                                frames,
+                            });
                         }
                         Err(other) => return Err(other),
                     }
@@ -691,7 +1018,11 @@ impl Interpreter {
                             for idx in (0..n).rev() {
                                 match self.execute(rand_exprs[idx].clone(), env.clone()) {
                                     Ok(v) => buf[idx] = v,
-                                    Err(Signal::Capture { proc, mut frames }) => {
+                                    Err(Signal::Capture {
+                                        target,
+                                        proc,
+                                        mut frames,
+                                    }) => {
                                         let mut evaluated_rev =
                                             Vec::with_capacity(n - idx - 1);
                                         for done_idx in ((idx + 1)..n).rev() {
@@ -709,7 +1040,11 @@ impl Interpreter {
                                             rator: rator.clone(),
                                             env: env.clone(),
                                         });
-                                        return Err(Signal::Capture { proc, frames });
+                                        return Err(Signal::Capture {
+                                            target,
+                                            proc,
+                                            frames,
+                                        });
                                     }
                                     Err(other) => return Err(other),
                                 }
@@ -723,12 +1058,20 @@ impl Interpreter {
                                 &env,
                             ) {
                                 Ok(rib) => SmallArgs::Heap(rib),
-                                Err(Signal::Capture { proc, mut frames }) => {
+                                Err(Signal::Capture {
+                                    target,
+                                    proc,
+                                    mut frames,
+                                }) => {
                                     frames.push(Context::Func {
                                         rator: rator.clone(),
                                         env: env.clone(),
                                     });
-                                    return Err(Signal::Capture { proc, frames });
+                                    return Err(Signal::Capture {
+                                        target,
+                                        proc,
+                                        frames,
+                                    });
                                 }
                                 Err(other) => return Err(other),
                             }
@@ -738,13 +1081,21 @@ impl Interpreter {
                                 Ok(mult_val) => {
                                     SmallArgs::Heap(Self::unpack_multiple_values(mult_val))
                                 }
-                                Err(Signal::Capture { proc, mut frames }) => {
+                                Err(Signal::Capture {
+                                    target,
+                                    proc,
+                                    mut frames,
+                                }) => {
                                     frames.push(Context::MultArg);
                                     frames.push(Context::Func {
                                         rator: rator.clone(),
                                         env: env.clone(),
                                     });
-                                    return Err(Signal::Capture { proc, frames });
+                                    return Err(Signal::Capture {
+                                        target,
+                                        proc,
+                                        frames,
+                                    });
                                 }
                                 Err(other) => return Err(other),
                             }
@@ -753,12 +1104,20 @@ impl Interpreter {
 
                     let fn_val = match self.execute(rator.clone(), env.clone()) {
                         Ok(v) => v,
-                        Err(Signal::Capture { proc, mut frames }) => {
+                        Err(Signal::Capture {
+                            target,
+                            proc,
+                            mut frames,
+                        }) => {
                             frames.push(Context::Apply {
                                 args_rib: args_rib.into_vec(),
                                 env: env.clone(),
                             });
-                            return Err(Signal::Capture { proc, frames });
+                            return Err(Signal::Capture {
+                                target,
+                                proc,
+                                frames,
+                            });
                         }
                         Err(other) => return Err(other),
                     };
@@ -782,22 +1141,15 @@ impl Interpreter {
                             return (native.func)(self, args_rib.as_slice(), &env);
                         }
                         Procedure::Continuation(k) => {
-                            let val = match args_rib {
-                                SmallArgs::Inline { len: 0, .. } => Value::Void,
-                                SmallArgs::Inline { len: 1, mut buf } => {
-                                    std::mem::replace(&mut buf[0], Value::Void)
-                                }
-                                SmallArgs::Heap(mut v) => match v.len() {
-                                    0 => Value::Void,
-                                    1 => v.pop().unwrap(),
-                                    _ => Value::Values(Box::new(v)),
-                                },
-                                other => Value::Values(Box::new(other.into_vec())),
-                            };
+                            let val = Self::unpack_continuation_args(args_rib);
                             return Err(Signal::Invoke {
                                 k_frames: k.frames().clone(),
                                 val,
                             });
+                        }
+                        Procedure::ComposableContinuation(k) => {
+                            let val = Self::unpack_continuation_args(args_rib);
+                            return self.resume_with_value(k.frames(), val);
                         }
                     }
                 }

@@ -3,8 +3,9 @@ use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::compiler::Compiler;
+use crate::continuation::PromptTag;
 use crate::env::Env;
-use crate::interpreter::{Interpreter, Signal};
+use crate::interpreter::{CaptureTarget, Interpreter, Signal};
 use crate::symbol::{Symbol, SymbolTable};
 use crate::value::{NativeFn, NativeProcedure, Procedure, Value};
 
@@ -58,6 +59,12 @@ pub fn register_standard_library(symbols: &mut SymbolTable) {
         ("_get-ticks", proc_get_ticks),
         ("/", proc_div),
         ("call-with-current-continuation", proc_call_cc),
+        ("make-continuation-prompt-tag", proc_make_continuation_prompt_tag),
+        ("default-continuation-prompt-tag", proc_default_continuation_prompt_tag),
+        ("continuation-prompt-tag?", proc_continuation_prompt_tag_pred),
+        ("call-with-continuation-prompt", proc_call_with_continuation_prompt),
+        ("abort-current-continuation", proc_abort_current_continuation),
+        ("call-with-composable-continuation", proc_call_with_composable_continuation),
         ("_compile", proc_compile),
         ("char?", proc_char_pred),
         ("error", proc_error),
@@ -527,17 +534,137 @@ fn proc_div(_i: &mut Interpreter, args: &[Value], _env: &Env) -> Result<Value, S
     Ok(Value::Int(a.wrapping_div(b)))
 }
 
+fn expect_procedure(val: &Value, name: &str) -> Result<Procedure, Signal> {
+    match val {
+        Value::Procedure(p) => Ok(p.clone()),
+        other => Err(Signal::Error(format!(
+            "{name} expected procedure, got {other}"
+        ))),
+    }
+}
+
+fn expect_prompt_tag(val: &Value, name: &str) -> Result<PromptTag, Signal> {
+    match val {
+        Value::PromptTag(tag) => Ok(tag.clone()),
+        other => Err(Signal::Error(format!(
+            "{name} expected continuation prompt tag, got {other}"
+        ))),
+    }
+}
+
 fn proc_call_cc(_i: &mut Interpreter, args: &[Value], _env: &Env) -> Result<Value, Signal> {
     expect_arity(args, 1, "call-with-current-continuation")?;
-    let proc = match &args[0] {
-        Value::Procedure(p) => p.clone(),
-        other => {
+    let proc = expect_procedure(&args[0], "call/cc")?;
+    Err(Signal::Capture {
+        target: CaptureTarget::Undelimited,
+        proc,
+        frames: Vec::new(),
+    })
+}
+
+fn proc_make_continuation_prompt_tag(
+    _i: &mut Interpreter,
+    args: &[Value],
+    _env: &Env,
+) -> Result<Value, Signal> {
+    if args.len() > 1 {
+        return Err(Signal::Error(format!(
+            "make-continuation-prompt-tag expects 0 or 1 argument(s), got {}",
+            args.len()
+        )));
+    }
+    let name = match args.first() {
+        None => None,
+        Some(Value::Symbol(s)) => Some(s.as_str().to_string()),
+        Some(Value::Str(s)) => Some(s.as_str().to_string()),
+        Some(other) => {
             return Err(Signal::Error(format!(
-                "call/cc expected procedure, got {other}"
+                "make-continuation-prompt-tag expected symbol or string name, got {other}"
             )))
         }
     };
+    Ok(Value::PromptTag(PromptTag::new(name)))
+}
+
+fn proc_default_continuation_prompt_tag(
+    i: &mut Interpreter,
+    args: &[Value],
+    _env: &Env,
+) -> Result<Value, Signal> {
+    expect_arity(args, 0, "default-continuation-prompt-tag")?;
+    Ok(Value::PromptTag(i.default_prompt_tag().clone()))
+}
+
+fn proc_continuation_prompt_tag_pred(
+    _i: &mut Interpreter,
+    args: &[Value],
+    _env: &Env,
+) -> Result<Value, Signal> {
+    expect_arity(args, 1, "continuation-prompt-tag?")?;
+    Ok(Value::Bool(matches!(args[0], Value::PromptTag(_))))
+}
+
+fn proc_call_with_continuation_prompt(
+    i: &mut Interpreter,
+    args: &[Value],
+    env: &Env,
+) -> Result<Value, Signal> {
+    if args.is_empty() || args.len() > 3 {
+        return Err(Signal::Error(format!(
+            "call-with-continuation-prompt expects 1 to 3 argument(s), got {}",
+            args.len()
+        )));
+    }
+    let thunk = expect_procedure(&args[0], "call-with-continuation-prompt")?;
+    let tag = if args.len() >= 2 {
+        expect_prompt_tag(&args[1], "call-with-continuation-prompt")?
+    } else {
+        i.default_prompt_tag().clone()
+    };
+    let handler = if args.len() == 3 {
+        Some(expect_procedure(&args[2], "call-with-continuation-prompt")?)
+    } else {
+        None
+    };
+    i.call_with_prompt(&thunk, &tag, handler.as_ref(), env)
+}
+
+fn proc_abort_current_continuation(
+    _i: &mut Interpreter,
+    args: &[Value],
+    _env: &Env,
+) -> Result<Value, Signal> {
+    if args.is_empty() {
+        return Err(Signal::Error(
+            "abort-current-continuation expects at least a prompt tag".to_string(),
+        ));
+    }
+    let tag = expect_prompt_tag(&args[0], "abort-current-continuation")?;
+    Err(Signal::Abort {
+        tag,
+        args: args[1..].to_vec(),
+    })
+}
+
+fn proc_call_with_composable_continuation(
+    i: &mut Interpreter,
+    args: &[Value],
+    _env: &Env,
+) -> Result<Value, Signal> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(Signal::Error(format!(
+            "call-with-composable-continuation expects 1 or 2 argument(s), got {}",
+            args.len()
+        )));
+    }
+    let proc = expect_procedure(&args[0], "call-with-composable-continuation")?;
+    let tag = if args.len() == 2 {
+        expect_prompt_tag(&args[1], "call-with-composable-continuation")?
+    } else {
+        i.default_prompt_tag().clone()
+    };
     Err(Signal::Capture {
+        target: CaptureTarget::Composable(tag),
         proc,
         frames: Vec::new(),
     })

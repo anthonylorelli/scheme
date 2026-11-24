@@ -149,3 +149,72 @@ pub const PRIMITIVES_SCM: &str = r#"
 /// external runtime files next to the executable if present.
 pub const EMBEDDED_PSYNTAX_PP: &str = include_str!("../../lib/psyntax.pp");
 pub const EMBEDDED_INIT_SCM: &str = include_str!("../../lib/init.scm");
+
+/// Rust-specific runtime syntax extensions loaded after `init.scm` (once `psyntax.pp`
+/// is active), providing hygienic `reset`/`shift` and `prompt`/`control` forms built
+/// directly on top of native multi-prompt delimited and composable continuations.
+pub const RUST_EXTENSIONS_SCM: &str = r#"
+(define-syntax reset-at
+  (syntax-rules ()
+    ((reset-at tag e1 e2 ...)
+     (call-with-continuation-prompt
+       (lambda () e1 e2 ...)
+       tag))))
+
+(define-syntax reset
+  (syntax-rules ()
+    ((reset e1 e2 ...)
+     (call-with-continuation-prompt
+       (lambda () e1 e2 ...)
+       (default-continuation-prompt-tag)))))
+
+(define-syntax shift-at
+  (syntax-rules ()
+    ((shift-at tag k e1 e2 ...)
+     (let ((t tag))
+       (call-with-composable-continuation
+         (lambda (raw-k)
+           (let ((k (lambda vals
+                      (call-with-continuation-prompt
+                        (lambda () (apply raw-k vals))
+                        t))))
+             (abort-current-continuation
+               t
+               (lambda () e1 e2 ...))))
+         t)))))
+
+(define-syntax shift
+  (syntax-rules ()
+    ((shift k e1 e2 ...)
+     (shift-at (default-continuation-prompt-tag) k e1 e2 ...))))
+
+(define-syntax prompt-at
+  (syntax-rules ()
+    ((prompt-at tag e1 e2 ...)
+     (call-with-continuation-prompt
+       (lambda () e1 e2 ...)
+       tag))))
+
+(define-syntax prompt
+  (syntax-rules ()
+    ((prompt e1 e2 ...)
+     (call-with-continuation-prompt
+       (lambda () e1 e2 ...)
+       (default-continuation-prompt-tag)))))
+
+(define-syntax control-at
+  (syntax-rules ()
+    ((control-at tag k e1 e2 ...)
+     (let ((t tag))
+       (call-with-composable-continuation
+         (lambda (k)
+           (abort-current-continuation
+             t
+             (lambda () e1 e2 ...)))
+         t)))))
+
+(define-syntax control
+  (syntax-rules ()
+    ((control k e1 e2 ...)
+     (control-at (default-continuation-prompt-tag) k e1 e2 ...))))
+"#;

@@ -2,7 +2,7 @@
 
 An R5RS-subset Scheme interpreter featuring **first-class continuations** (`call/cc`) implemented via **stack reconstruction** and hygienic/unhygienic macros powered by Dybvig & Waddell's portable `syntax-case` (`psyntax.pp` v7.0), based on *Implementing Continuations for a Virtual Machine Environment* (Anthony J. Lorelli, 2006; see [`doc/Lorelli-Project-2006.pdf`](doc/Lorelli-Project-2006.pdf)).
 
-The repository contains both the original **C# (.NET)** implementation and a complete **Rust** port sharing the runtime initialization library and Scheme test/benchmark suite.
+The repository contains both the original **C# (.NET)** implementation and an optimized **Rust** port sharing the runtime initialization library and Scheme test/benchmark suite. The Rust implementation additionally supports **multi-prompt delimited and composable continuations** (`call-with-continuation-prompt`, `abort-current-continuation`, `call-with-composable-continuation`, and hygienic `reset`/`shift` & `prompt`/`control`).
 
 ## Repository Structure
 
@@ -16,7 +16,7 @@ The repository contains both the original **C# (.NET)** implementation and a com
 ├── rust/             # Rust implementation and Cargo test suite
 │   ├── Cargo.toml
 │   ├── src/          # Rust interpreter library + CLI/REPL binary
-│   └── tests/        # Rust integration tests
+│   └── tests/        # Integration, undelimited, and delimited continuation tests
 ├── lib/              # Shared Scheme runtime initialization files
 │   ├── psyntax.pp    # Portable syntax-case v7.0 macro expander
 │   └── init.scm      # Runtime helpers, benchmark harness, and define-macro
@@ -31,6 +31,33 @@ The repository contains both the original **C# (.NET)** implementation and a com
 └── doc/
     ├── Lorelli-Project-2006.pdf
     └── Performance-Comparison.md # Empirical C# vs. Rust benchmark & architectural analysis
+```
+
+## Delimited & Composable Continuations (Rust)
+
+The Rust runtime extends stack reconstruction with Racket-style multi-prompt delimited and composable continuations while preserving full compatibility with undelimited `call/cc`:
+
+- **Primitives**:
+  - `(make-continuation-prompt-tag [name])`, `(default-continuation-prompt-tag)`, `(continuation-prompt-tag? x)`
+  - `(call-with-continuation-prompt thunk [tag [handler]])`
+  - `(abort-current-continuation tag val ...)`
+  - `(call-with-composable-continuation proc [tag])`
+- **Hygienic syntax** (built on the primitives above):
+  - `(reset body ...)` / `(reset-at tag body ...)` and `(shift k body ...)` / `(shift-at tag k body ...)` (Danvy & Filinski static delimited continuations)
+  - `(prompt body ...)` / `(prompt-at tag body ...)` and `(control k body ...)` / `(control-at tag k body ...)` (Felleisen dynamic delimited continuations)
+
+```scheme
+;; Static delimited continuations (shift / reset)
+(+ 1 (reset (* 2 (shift k (k (k 10))))))
+;; => 41
+
+;; Pure functional multi-prompt abort / algebraic effect handler
+(let ((tag (make-continuation-prompt-tag 'fail)))
+  (call-with-continuation-prompt
+    (lambda () (+ 10 (abort-current-continuation tag 'recovered)))
+    tag
+    (lambda (v) (list 'handled v))))
+;; => (handled recovered)
 ```
 
 ## Building and Testing
