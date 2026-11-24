@@ -622,7 +622,10 @@ fn proc_call_with_continuation_prompt(
         i.default_prompt_tag().clone()
     };
     let handler = if args.len() == 3 {
-        Some(expect_procedure(&args[2], "call-with-continuation-prompt")?)
+        match &args[2] {
+            Value::Bool(false) => None,
+            other => Some(expect_procedure(other, "call-with-continuation-prompt")?),
+        }
     } else {
         None
     };

@@ -535,3 +535,98 @@ fn tail_recursive_prompt_abort_loop() {
         "5000"
     );
 }
+
+#[test]
+fn top_level_default_prompt_and_handler_edge_cases() {
+    // Implicit top-level default prompt handles `shift` and `abort-current-continuation`
+    assert_eq!(eval("(+ 1 (shift k (+ 10 (k 5))))"), "16");
+    assert_eq!(
+        eval("(+ 999 (abort-current-continuation (default-continuation-prompt-tag) (lambda () 42)))"),
+        "42"
+    );
+
+    // Default handler arity and type errors (both inside explicit prompt and at top level)
+    let arity_err = eval_err("(reset (abort-current-continuation (default-continuation-prompt-tag) 1 2))");
+    assert!(
+        arity_err.contains("Default prompt handler expects 1 thunk argument"),
+        "Unexpected error: {arity_err}"
+    );
+    let type_err = eval_err("(abort-current-continuation (default-continuation-prompt-tag) 42)");
+    assert!(
+        type_err.contains("Default prompt handler expects a procedure"),
+        "Unexpected error: {type_err}"
+    );
+
+    // `#f` as the 3rd argument selects the default prompt handler (Racket parity)
+    assert_eq!(
+        eval(
+            r#"
+            (let ((tag (make-continuation-prompt-tag 'df)))
+              (call-with-continuation-prompt
+                (lambda ()
+                  (+ 10 (abort-current-continuation tag (lambda () 42))))
+                tag
+                #f))
+            "#
+        ),
+        "42"
+    );
+
+    // Nested same-tag prompts where inner custom handler aborts to outer prompt
+    assert_eq!(
+        eval(
+            r#"
+            (let ((tag (make-continuation-prompt-tag 'same)))
+              (call-with-continuation-prompt
+                (lambda ()
+                  (call-with-continuation-prompt
+                    (lambda () (abort-current-continuation tag 1))
+                    tag
+                    (lambda (v) (abort-current-continuation tag (+ v 10)))))
+                tag
+                (lambda (v) (+ v 100))))
+            "#
+        ),
+        "111"
+    );
+
+    // Composable continuations captured in operator position (`Apply`) and 5-arg heap calls (`ArgEval`)
+    assert_eq!(
+        eval("(reset ((shift k (list (k +) (k -) (k *))) 10 3))"),
+        "(13 7 30)"
+    );
+    assert_eq!(
+        eval("(reset (list 1 2 (shift k (list (k 30) (k 300))) 4 5))"),
+        "((1 2 30 4 5) (1 2 300 4 5))"
+    );
+
+    // Passing an undelimited `call/cc` continuation or composable continuation as a prompt handler
+    assert_eq!(
+        eval(
+            r#"
+            (let ((tag (make-continuation-prompt-tag 'esc)))
+              (+ 1 (call/cc
+                     (lambda (exit)
+                       (+ 100 (call-with-continuation-prompt
+                                (lambda () (abort-current-continuation tag 41))
+                                tag
+                                exit))))))
+            "#
+        ),
+        "42"
+    );
+    assert_eq!(
+        eval(
+            r#"
+            (let ((tag (make-continuation-prompt-tag 'comp))
+                  (add10 (reset (+ 10 (shift k k)))))
+              (call-with-continuation-prompt
+                (lambda () (abort-current-continuation tag 32))
+                tag
+                add10))
+            "#
+        ),
+        "42"
+    );
+}
+

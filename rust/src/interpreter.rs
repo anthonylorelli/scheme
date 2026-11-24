@@ -317,6 +317,25 @@ impl Interpreter {
         self.run_with_prompt_entry(PromptEntry::Thunk { proc: thunk, env }, tag, handler)
     }
 
+    fn invoke_default_prompt_handler(&mut self, args: &[Value]) -> Result<Value, Signal> {
+        if args.len() != 1 {
+            return Err(Signal::Error(format!(
+                "Default prompt handler expects 1 thunk argument, got {}",
+                args.len()
+            )));
+        }
+        let abort_proc = match &args[0] {
+            Value::Procedure(p) => p.clone(),
+            other => {
+                return Err(Signal::Error(format!(
+                    "Default prompt handler expects a procedure, got {other}"
+                )))
+            }
+        };
+        let top_env = EnvFrame::empty_top_level();
+        self.apply_procedure(&abort_proc, Vec::new(), &top_env)
+    }
+
     fn run_with_prompt_entry(
         &mut self,
         entry: PromptEntry<'_>,
@@ -345,22 +364,7 @@ impl Interpreter {
                             let top_env = EnvFrame::empty_top_level();
                             return self.apply_procedure(h, args, &top_env);
                         }
-                        if args.len() != 1 {
-                            return Err(Signal::Error(format!(
-                                "Default prompt handler expects 1 thunk argument, got {}",
-                                args.len()
-                            )));
-                        }
-                        let abort_proc = match &args[0] {
-                            Value::Procedure(p) => p.clone(),
-                            other => {
-                                return Err(Signal::Error(format!(
-                                    "Default prompt handler expects a procedure, got {other}"
-                                )))
-                            }
-                        };
-                        let top_env = EnvFrame::empty_top_level();
-                        pending = self.apply_procedure(&abort_proc, Vec::new(), &top_env);
+                        pending = self.invoke_default_prompt_handler(&args);
                     } else {
                         return Err(Signal::Abort {
                             tag: abort_tag,
@@ -438,22 +442,7 @@ impl Interpreter {
                 }
                 Signal::Abort { tag, args } => {
                     if tag == self.default_prompt_tag {
-                        if args.len() != 1 {
-                            return Err(format!(
-                                "Default prompt handler expects 1 thunk argument, got {}",
-                                args.len()
-                            ));
-                        }
-                        let abort_proc = match &args[0] {
-                            Value::Procedure(p) => p.clone(),
-                            other => {
-                                return Err(format!(
-                                    "Default prompt handler expects a procedure, got {other}"
-                                ))
-                            }
-                        };
-                        let top_env = EnvFrame::empty_top_level();
-                        *pending_res = self.apply_procedure(&abort_proc, Vec::new(), &top_env);
+                        *pending_res = self.invoke_default_prompt_handler(&args);
                     } else {
                         return Err(format!("No continuation prompt found for tag {tag}"));
                     }
@@ -461,6 +450,34 @@ impl Interpreter {
                 Signal::Error(msg) => return Err(msg),
             }
         }
+    }
+
+    fn resume_through_prompt(
+        &mut self,
+        entry: PromptEntry<'_>,
+        prompt: &Context,
+        outside: &[Context],
+    ) -> Result<Value, Signal> {
+        let Context::Prompt { tag, handler } = prompt else {
+            unreachable!("resume_through_prompt requires a Context::Prompt");
+        };
+        let prompt_val = match self.run_with_prompt_entry(entry, tag, handler.as_ref()) {
+            Ok(v) => v,
+            Err(Signal::Capture {
+                target,
+                proc,
+                mut frames,
+            }) => {
+                frames.extend_from_slice(outside);
+                return Err(Signal::Capture {
+                    target,
+                    proc,
+                    frames,
+                });
+            }
+            Err(other) => return Err(other),
+        };
+        self.resume_with_value(outside, prompt_val)
     }
 
     fn resume_with_procedure(
@@ -473,36 +490,17 @@ impl Interpreter {
             .iter()
             .rposition(|c| matches!(c, Context::Prompt { .. }))
         {
-            let Context::Prompt { tag, handler } = &k_frames[prompt_idx] else {
-                unreachable!();
-            };
             let inside = &k_frames[..prompt_idx];
             let outside = &k_frames[prompt_idx + 1..];
-            let prompt_val = match self.run_with_prompt_entry(
+            return self.resume_through_prompt(
                 PromptEntry::ResumeProcedure {
                     frames: inside,
                     proc,
                     k_val,
                 },
-                tag,
-                handler.as_ref(),
-            ) {
-                Ok(v) => v,
-                Err(Signal::Capture {
-                    target,
-                    proc: inner_proc,
-                    mut frames,
-                }) => {
-                    frames.extend_from_slice(outside);
-                    return Err(Signal::Capture {
-                        target,
-                        proc: inner_proc,
-                        frames,
-                    });
-                }
-                Err(other) => return Err(other),
-            };
-            return self.resume_with_value(outside, prompt_val);
+                &k_frames[prompt_idx],
+                outside,
+            );
         }
 
         let top_env = EnvFrame::empty_top_level();
@@ -531,35 +529,16 @@ impl Interpreter {
             .iter()
             .rposition(|c| matches!(c, Context::Prompt { .. }))
         {
-            let Context::Prompt { tag, handler } = &k_frames[prompt_idx] else {
-                unreachable!();
-            };
             let inside = &k_frames[..prompt_idx];
             let outside = &k_frames[prompt_idx + 1..];
-            let prompt_val = match self.run_with_prompt_entry(
+            return self.resume_through_prompt(
                 PromptEntry::ResumeValue {
                     frames: inside,
                     val,
                 },
-                tag,
-                handler.as_ref(),
-            ) {
-                Ok(v) => v,
-                Err(Signal::Capture {
-                    target,
-                    proc,
-                    mut frames,
-                }) => {
-                    frames.extend_from_slice(outside);
-                    return Err(Signal::Capture {
-                        target,
-                        proc,
-                        frames,
-                    });
-                }
-                Err(other) => return Err(other),
-            };
-            return self.resume_with_value(outside, prompt_val);
+                &k_frames[prompt_idx],
+                outside,
+            );
         }
 
         for (idx, ctx) in k_frames.iter().enumerate() {
